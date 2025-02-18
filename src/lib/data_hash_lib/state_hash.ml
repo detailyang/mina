@@ -1,7 +1,4 @@
 (* state_hash.ml -- defines the type for the protocol state hash *)
-
-[%%import "/src/config.mlh"]
-
 open Core_kernel
 open Snark_params.Tick
 
@@ -13,18 +10,7 @@ end)
 
 let dummy = of_hash Outside_hash_image.t
 
-[%%ifdef consensus_mechanism]
-
 let zero = dummy
-
-[%%else]
-
-(* in the nonconsensus world, we don't have the Pedersen machinery available,
-   so just inline the value for zero
-*)
-let zero = Field.of_string "0"
-
-[%%endif]
 
 let raw_hash_bytes = to_bytes
 
@@ -56,8 +42,11 @@ module Stable = struct
   end
 end]
 
-type _unused = unit constraint t = Stable.Latest.t
+let (_ : (t, Stable.Latest.t) Type_equal.t) = Type_equal.T
 
 let deriver obj =
-  Fields_derivers_zkapps.iso_string obj ~name:"StateHash" ~js_type:Field
-    ~to_string:to_base58_check ~of_string:of_base58_check_exn
+  Fields_derivers_zkapps.(
+    iso_string ~name:"StateHash" ~js_type:Field ~to_string:to_base58_check
+      ~of_string:of_base58_check_exn
+    |> needs_custom_js ~name:"StateHash" ~js_type:field)
+    obj

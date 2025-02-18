@@ -83,10 +83,7 @@ module Kind = struct
 end
 
 module Account_creation_fees_paid = struct
-  type t =
-    | By_no_one
-    | By_fee_payer of Unsigned_extended.UInt64.t
-    | By_receiver of Unsigned_extended.UInt64.t
+  type t = By_no_one | By_receiver of Unsigned_extended.UInt64.t
   [@@deriving equal, to_yojson, sexp, compare]
 end
 
@@ -138,6 +135,14 @@ module Partial = struct
     let%bind fee_payer_pk = pk_to_public_key ~context:"Fee payer" t.fee_payer in
     let%bind source_pk = pk_to_public_key ~context:"Source" t.source in
     let%bind receiver_pk = pk_to_public_key ~context:"Receiver" t.receiver in
+    let%bind () =
+      Result.ok_if_true
+        (Public_key.Compressed.equal fee_payer_pk source_pk)
+        ~error:
+          (Errors.create
+             (`Operations_not_valid
+               [ Errors.Partial_reason.Fee_payer_and_source_mismatch ] ) )
+    in
     let%bind memo =
       match t.memo with
       | Some memo -> (
@@ -157,16 +162,14 @@ module Partial = struct
                      [ Errors.Partial_reason.Amount_not_some ] ) )
           in
           let payload =
-            { Payment_payload.Poly.source_pk
-            ; receiver_pk
+            { Payment_payload.Poly.receiver_pk
             ; amount = Amount_currency.of_uint64 amount
             }
           in
           Signed_command.Payload.Body.Payment payload
       | `Delegation ->
           let payload =
-            Stake_delegation.Set_delegate
-              { delegator = source_pk; new_delegate = receiver_pk }
+            Stake_delegation.Set_delegate { new_delegate = receiver_pk }
           in
           Result.return @@ Signed_command.Payload.Body.Stake_delegation payload
     in
@@ -174,7 +177,8 @@ module Partial = struct
       ~fee:(Fee_currency.of_uint64 t.fee)
       ~fee_payer_pk ~nonce ~body ~memo
       ~valid_until:
-        (Option.map ~f:Mina_numbers.Global_slot.of_uint32 t.valid_until)
+        (Option.map ~f:Mina_numbers.Global_slot_since_genesis.of_uint32
+           t.valid_until )
 end
 
 let forget (t : t) : Partial.t =
@@ -411,11 +415,6 @@ let to_operations ~failure_status (t : Partial.t) : Operation.t list =
             ; related_to = None
             }
           ]
-      | Some (`Applied (Account_creation_fees_paid.By_fee_payer amount)) ->
-          [ { Op.label = `Account_creation_fee_via_fee_payer amount
-            ; related_to = None
-            }
-          ]
       | _ ->
           [] )
     @
@@ -510,16 +509,6 @@ let to_operations ~failure_status (t : Partial.t) : Operation.t list =
           ; status = Option.map ~f:Operation_statuses.name status
           ; account = Some (account_id t.receiver t.token)
           ; _type = Operation_types.name `Account_creation_fee_via_payment
-          ; amount = Some Amount_of.(negated @@ mina account_creation_fee)
-          ; coin_change = None
-          ; metadata
-          }
-      | `Account_creation_fee_via_fee_payer account_creation_fee ->
-          { Operation.operation_identifier
-          ; related_operations
-          ; status = Option.map ~f:Operation_statuses.name status
-          ; account = Some (account_id t.fee_payer t.fee_token)
-          ; _type = Operation_types.name `Account_creation_fee_via_fee_payer
           ; amount = Some Amount_of.(negated @@ mina account_creation_fee)
           ; coin_change = None
           ; metadata

@@ -1,15 +1,4 @@
-[%%import "/src/config.mlh"]
-
-[%%ifdef consensus_mechanism]
-
 open Pickles.Impls.Step.Internal_Basic
-
-[%%else]
-
-open Snark_params.Tick
-
-[%%endif]
-
 module Input = Random_oracle_input
 
 module State : sig
@@ -18,6 +7,10 @@ module State : sig
   val map : 'a t -> f:('a -> 'b) -> 'b t
 
   val map2 : 'a t -> 'b t -> f:('a -> 'b -> 'c) -> 'c t
+
+  val to_array : 'a t -> 'a array
+
+  val of_array : 'a array -> 'a t
 end
 
 include
@@ -29,8 +22,6 @@ include
      and type input := Field.t Random_oracle_input.Chunked.t
 
 val salt : string -> Field.t State.t
-
-[%%ifdef consensus_mechanism]
 
 module Checked :
   Intf.S
@@ -50,10 +41,18 @@ val read_typ' :
      Field.Var.t Input.Chunked.t
   -> Field.t Input.Chunked.t Pickles.Impls.Step.Internal_Basic.As_prover.t
 
-[%%endif]
-
 module Legacy : sig
   module Input = Random_oracle_input.Legacy
+
+  module Inputs : sig
+    val rounds_full : int
+
+    val initial_ark : bool
+
+    val rounds_partial : int
+
+    val alpha : int
+  end
 
   module State : sig
     type 'a t [@@deriving equal, sexp, compare]
@@ -61,6 +60,10 @@ module Legacy : sig
     val map : 'a t -> f:('a -> 'b) -> 'b t
 
     val map2 : 'a t -> 'b t -> f:('a -> 'b -> 'c) -> 'c t
+
+    val to_array : 'a t -> 'a array
+
+    val of_array : 'a array -> 'a t
   end
 
   include
@@ -73,8 +76,6 @@ module Legacy : sig
 
   val salt : string -> Field.t State.t
 
-  [%%ifdef consensus_mechanism]
-
   module Checked :
     Intf.S
       with type field := Field.Var.t
@@ -82,6 +83,4 @@ module Legacy : sig
        and type bool := Boolean.var
        and module State := State
        and type input := (Field.Var.t, Boolean.var) Random_oracle_input.Legacy.t
-
-  [%%endif]
 end

@@ -45,9 +45,15 @@ let command_run =
      in
      fun () ->
        let logger = Logger.create () in
+       let genesis_constants = Genesis_constants.Compiled.genesis_constants in
+       let constraint_constants =
+         Genesis_constants.Compiled.constraint_constants
+       in
        Stdout_log.setup log_json log_level ;
+       [%log info] "Starting archive process; built with commit $commit"
+         ~metadata:[ ("commit", `String Mina_version.commit_id) ] ;
        Archive_lib.Processor.setup_server ~metrics_server_port ~logger
-         ~constraint_constants:Genesis_constants.Constraint_constants.compiled
+         ~genesis_constants ~constraint_constants
          ~postgres_address:postgres.value
          ~server_port:
            (Option.value server_port.value ~default:server_port.default)
@@ -85,9 +91,7 @@ let command_prune =
        in
        let go () =
          let open Deferred.Result.Let_syntax in
-         let%bind ((module Conn) as conn) =
-           Caqti_async.connect postgres.value
-         in
+         let%bind ((module Conn) as conn) = Mina_caqti.connect postgres.value in
          let%bind () = Conn.start () in
          match%bind.Async.Deferred
            let%bind () =

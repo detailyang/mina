@@ -2,14 +2,68 @@
 
 open Async
 open Core_kernel
-open Caqti_async
 open Mina_base
 
-type _ Caqti_type.field +=
-  | Array_nullable_int : int option array Caqti_type.field
+(* custom Caqti types for generating type annotations on queries *)
+let find_req t u s = Caqti_request.Infix.(t ->! u) s
 
-type _ Caqti_type.field +=
-  | Array_nullable_string : string option array Caqti_type.field
+let find_opt_req t u s = Caqti_request.Infix.(t ->? u) s
+
+let collect_req t u s = Caqti_request.Infix.(t ->* u) s
+
+let exec_req t s = Caqti_request.Infix.(t ->. Caqti_type.unit) s
+
+module type CONNECTION = sig
+  include Caqti_async.CONNECTION
+
+  (** Code expects any queries to differing sources to never interfere. *)
+  val source : Uri.t
+end
+
+module Wrap
+    (Conn : Caqti_async.CONNECTION) (Arg : sig
+      val source : Uri.t
+    end) : CONNECTION = struct
+  include Conn
+  include Arg
+end
+
+let wrap_conn (module Conn : Caqti_async.CONNECTION) ~source =
+  let module Conn =
+    Wrap
+      (Conn)
+      (struct
+        let source = source
+      end)
+  in
+  (module Conn : CONNECTION)
+
+module Pool = struct
+  type ('a, 'e) t = { source : Uri.t; pool : ('a, 'e) Caqti_async.Pool.t }
+
+  let wrap ~source pool = { source; pool }
+
+  let use (f : (module CONNECTION) -> 'a) pool =
+    Caqti_async.Pool.use
+      (fun (module Conn : Caqti_async.CONNECTION) ->
+        f (wrap_conn (module Conn) ~source:pool.source) )
+      pool.pool
+end
+
+let connect_pool ?max_size uri =
+  let size = max_size in
+  let%map.Result pool =
+    Caqti_async.connect_pool
+      ~pool_config:
+        Caqti_pool_config.(
+          merge_left (default_from_env ()) (create ?max_size:size ()))
+      uri
+  in
+  Pool.wrap ~source:uri pool
+
+let connect uri =
+  let%map.Deferred.Result conn = Caqti_async.connect uri in
+  wrap_conn ~source:uri conn
 
 module Type_spec = struct
   type (_, _) t =
@@ -22,7 +76,7 @@ module Type_spec = struct
      | [] ->
          (Caqti_type.unit : tuple Caqti_type.t)
      | rep :: spec ->
-         Caqti_type.tup2 rep (to_rep spec)
+         Caqti_type.t2 rep (to_rep spec)
 
   let rec hlist_to_tuple :
             'hlist 'tuple.
@@ -90,43 +144,14 @@ let make_coding (type a) ~(elem_to_string : a -> string)
   in
   (encode, decode)
 
-(* register coding for nullable int arrays *)
-let () =
-  let open Caqti_type.Field in
-  let rep = Caqti_type.String in
+(** this type may require type annotations in queries, eg.
+   `SELECT id FROM zkapp_states WHERE element_ids = ?::int[]`
+*)
+let array_nullable_int_typ =
   let encode, decode =
     make_coding ~elem_to_string:Int.to_string ~elem_of_string:Int.of_string
   in
-  let get_coding : type a. _ -> a t -> a coding =
-   fun _ -> function
-    | Array_nullable_int ->
-        Coding { rep; encode; decode }
-    | _ ->
-        assert false
-  in
-  define_coding Array_nullable_int { get_coding }
-
-(* register coding for nullable string arrays *)
-let () =
-  let open Caqti_type.Field in
-  let rep = Caqti_type.String in
-  let encode, decode =
-    make_coding ~elem_to_string:Fn.id ~elem_of_string:Fn.id
-  in
-  let get_coding : type a. _ -> a t -> a coding =
-   fun _ -> function
-    | Array_nullable_string ->
-        Coding { rep; encode; decode }
-    | _ ->
-        assert false
-  in
-  define_coding Array_nullable_string { get_coding }
-
-(* this type may require type annotations in queries, eg.
-   `SELECT id FROM zkapp_states WHERE element_ids = ?::int[]`
-*)
-let array_nullable_int_typ : int option array Caqti_type.t =
-  Caqti_type.field Array_nullable_int
+  Caqti_type.custom ~encode ~decode Caqti_type.string
 
 let array_int_typ : int array Caqti_type.t =
   let open Result.Let_syntax in
@@ -139,11 +164,34 @@ let array_int_typ : int array Caqti_type.t =
   in
   Caqti_type.custom array_nullable_int_typ ~encode ~decode
 
-(* this type may require type annotations in queries, e.g.
+(** this type may require type annotations in queries, eg.
+   `SELECT id FROM zkapp_states WHERE element_ids = ?::bigint[]`
+*)
+let array_nullable_int64_typ =
+  let encode, decode =
+    make_coding ~elem_to_string:Int64.to_string ~elem_of_string:Int64.of_string
+  in
+  Caqti_type.custom ~encode ~decode Caqti_type.string
+
+let array_int64_typ : int64 array Caqti_type.t =
+  let open Result.Let_syntax in
+  let encode xs = return @@ Array.map ~f:Option.some xs in
+  let decode xs =
+    Option.all (Array.to_list xs)
+    |> Result.of_option
+         ~error:"Failed to decode int64 array, encountered NULL value"
+    >>| Array.of_list
+  in
+  Caqti_type.custom array_nullable_int64_typ ~encode ~decode
+
+(*** this type may require type annotations in queries, e.g.
    `SELECT id FROM zkapp_states WHERE element_ids = ?::string[]`
 *)
-let array_nullable_string_typ : string option array Caqti_type.t =
-  Caqti_type.field Array_nullable_string
+let array_nullable_string_typ =
+  let encode, decode =
+    make_coding ~elem_to_string:Fn.id ~elem_of_string:Fn.id
+  in
+  Caqti_type.custom ~encode ~decode Caqti_type.string
 
 let array_string_typ : string array Caqti_type.t =
   let open Result.Let_syntax in
@@ -189,10 +237,12 @@ let add_if_some (f : 'arg -> ('res, 'err) Deferred.Result.t) :
     'arg option -> ('res option, 'err) Deferred.Result.t =
   Fn.compose deferred_result_lift_opt @@ Option.map ~f
 
+(* if zkApp-related item is Set, run `f` *)
 let add_if_zkapp_set (f : 'arg -> ('res, 'err) Deferred.Result.t) :
     'arg Zkapp_basic.Set_or_keep.t -> ('res option, 'err) Deferred.Result.t =
   Fn.compose (add_if_some f) Zkapp_basic.Set_or_keep.to_option
 
+(* if zkApp-related item is Check, run `f` *)
 let add_if_zkapp_check (f : 'arg -> ('res, 'err) Deferred.Result.t) :
     'arg Zkapp_basic.Or_ignore.t -> ('res option, 'err) Deferred.Result.t =
   Fn.compose (add_if_some f) Zkapp_basic.Or_ignore.to_option
@@ -242,12 +292,15 @@ let insert_into_cols ~(returning : string) ~(table_name : string)
     (String.concat ~sep:", " cols)
     values returning
 
+(* run `select_cols` and return the result, if found
+   if not found, run `insert_into_cols` and return the result
+*)
 let select_insert_into_cols ~(select : string * 'select Caqti_type.t)
     ~(table_name : string) ?tannot ~(cols : string list * 'cols Caqti_type.t)
     (module Conn : CONNECTION) (value : 'cols) =
   let open Deferred.Result.Let_syntax in
   Conn.find_opt
-    ( Caqti_request.find_opt (snd cols) (snd select)
+    ( Caqti_request.Infix.(snd cols ->? snd select)
     @@ select_cols ~select:(fst select) ~table_name ?tannot ~cols:(fst cols) ()
     )
     value
@@ -256,13 +309,46 @@ let select_insert_into_cols ~(select : string * 'select Caqti_type.t)
       return id
   | None ->
       Conn.find
-        ( Caqti_request.find (snd cols) (snd select)
+        ( Caqti_request.Infix.(snd cols ->! snd select)
         @@ insert_into_cols ~returning:(fst select) ~table_name ?tannot
              ~cols:(fst cols) () )
         value
 
+let sep_by_comma ?(parenthesis = false) xs =
+  List.map xs ~f:(if parenthesis then sprintf "('%s')" else sprintf "'%s'")
+  |> String.concat ~sep:", "
+
+let insert_multi_into_col ~(table_name : string)
+    ~(col : string * 'col Caqti_type.t) (module Conn : CONNECTION)
+    (values : string list) =
+  let open Deferred.Result.Let_syntax in
+  let insert =
+    sprintf
+      {sql| INSERT INTO %s (%s) VALUES %s
+            ON CONFLICT (%s)
+            DO NOTHING |sql}
+      table_name (fst col)
+      (sep_by_comma ~parenthesis:true values)
+      (fst col)
+  in
+  let%bind () =
+    Conn.exec
+      (Caqti_request.Infix.(Caqti_type.unit ->. Caqti_type.unit) insert)
+      ()
+  in
+  let search =
+    sprintf
+      {sql| SELECT %s, id FROM %s
+            WHERE %s in (%s) |sql}
+      (fst col) table_name (fst col) (sep_by_comma values)
+  in
+  Conn.collect_list
+    Caqti_request.Infix.(
+      (Caqti_type.unit ->* Caqti_type.(t2 (snd col) int)) search)
+    ()
+
 let query ~f pool =
-  match%bind Caqti_async.Pool.use f pool with
+  match%bind Pool.use f pool with
   | Ok v ->
       return v
   | Error msg ->
@@ -282,11 +368,13 @@ let make_get_opt ~of_option ~f item_opt =
   in
   of_option res_opt
 
+(** convert options to Set or Keep for zkApps-related results *)
 let get_zkapp_set_or_keep (item_opt : 'arg option)
     ~(f : 'arg -> ('res, _) Deferred.Result.t) :
     'res Zkapp_basic.Set_or_keep.t Deferred.t =
   make_get_opt ~of_option:Zkapp_basic.Set_or_keep.of_option ~f item_opt
 
+(** convert options to Check or Ignore for zkApps-related results *)
 let get_zkapp_or_ignore (item_opt : 'arg option)
     ~(f : 'arg -> ('res, _) Deferred.Result.t) :
     'res Zkapp_basic.Or_ignore.t Deferred.t =

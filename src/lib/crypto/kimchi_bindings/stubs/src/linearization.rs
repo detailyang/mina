@@ -2,79 +2,67 @@ use kimchi::{
     circuits::{
         constraints::FeatureFlags,
         expr::Linearization,
-        lookup::constraints::LookupConfiguration,
-        lookup::lookups::{JointLookup, LookupInfo, LookupPattern, LookupsUsed},
+        lookup::lookups::{LookupFeatures, LookupPatterns},
     },
     linearization::{constraints_expr, linearization_columns},
 };
 
 /// Converts the linearization of the kimchi circuit polynomial into a printable string.
-pub fn linearization_strings<F: ark_ff::PrimeField + ark_ff::SquareRootField>(
-    lookup_configuration: Option<LookupConfiguration<F>>,
-) -> (String, Vec<(String, String)>) {
-    let evaluated_cols = linearization_columns::<F>(lookup_configuration.as_ref());
-    let feature_flags = match lookup_configuration {
-        None => None,
-        Some(lookup_configuration) => Some(FeatureFlags {
-            chacha: false,
-            range_check: false,
-            rot: false,
+pub fn linearization_strings<F: ark_ff::PrimeField>(
+    uses_custom_gates: bool,
+) -> (String, Vec<(String, String)>)
+    where
+        num_bigint::BigUint: From<F::BigInt>,
+{
+    let features = if uses_custom_gates {
+        None
+    } else {
+        Some(FeatureFlags {
+            range_check0: false,
+            range_check1: false,
             foreign_field_add: false,
             foreign_field_mul: false,
             xor: false,
-            lookup_configuration: Some(lookup_configuration),
-        }),
+            rot: false,
+            lookup_features: LookupFeatures {
+                patterns: LookupPatterns {
+                    xor: false,
+                    lookup: false,
+                    range_check: false,
+                    foreign_field_mul: false,
+                },
+                joint_lookup_used: false,
+                uses_runtime_tables: false,
+            },
+        })
     };
-    let (linearization, _powers_of_alpha) = constraints_expr::<F>(feature_flags.as_ref(), true);
+    let evaluated_cols = linearization_columns::<F>(features.as_ref());
+    let (linearization, _powers_of_alpha) = constraints_expr::<F>(features.as_ref(), true);
 
     let Linearization {
         constant_term,
         mut index_terms,
     } = linearization.linearize(evaluated_cols).unwrap();
 
-    // HashMap deliberately uses an unstable order; here we sort to ensure that the output is
-    // consistent when printing.
+    // HashMap deliberately uses an unstable order; here we sort to ensure that
+    // the output is consistent when printing.
     index_terms.sort_by(|(x, _), (y, _)| x.cmp(y));
 
     let constant = constant_term.ocaml_str();
     let other_terms = index_terms
         .iter()
-        .map(|(col, expr)| (format!("{:?}", col), format!("{}", expr.ocaml_str())))
+        .map(|(col, expr)| (format!("{:?}", col), expr.ocaml_str()))
         .collect();
 
     (constant, other_terms)
 }
 
-pub fn lookup_gate_config<F: ark_ff::PrimeField + ark_ff::SquareRootField>(
-) -> LookupConfiguration<F> {
-    LookupConfiguration {
-        lookup_used: LookupsUsed::Joint,
-
-        lookup_info: LookupInfo::create([LookupPattern::Lookup].into_iter().collect(), true),
-
-        dummy_lookup: JointLookup {
-            table_id: F::zero(),
-            entry: vec![],
-        },
-    }
-}
-
 #[ocaml::func]
 pub fn fp_linearization_strings() -> (String, Vec<(String, String)>) {
-    linearization_strings::<mina_curves::pasta::Fp>(None)
+    linearization_strings::<mina_curves::pasta::Fp>(true)
 }
 
 #[ocaml::func]
 pub fn fq_linearization_strings() -> (String, Vec<(String, String)>) {
-    linearization_strings::<mina_curves::pasta::Fq>(None)
-}
-
-#[ocaml::func]
-pub fn fp_lookup_gate_linearization_strings() -> (String, Vec<(String, String)>) {
-    linearization_strings::<mina_curves::pasta::Fp>(Some(lookup_gate_config()))
-}
-
-#[ocaml::func]
-pub fn fq_lookup_gate_linearization_strings() -> (String, Vec<(String, String)>) {
-    linearization_strings::<mina_curves::pasta::Fq>(Some(lookup_gate_config()))
+    linearization_strings::<mina_curves::pasta::Fq>(false)
 }

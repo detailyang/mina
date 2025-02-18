@@ -3,7 +3,7 @@ open Signature_lib
 open Core_kernel
 
 module Timing = struct
-  type t = (int, int, int) Account_timing.Poly.t
+  type t = (int, int, int, int) Account_timing.Poly.t
 
   let gen =
     let open Quickcheck.Generator.Let_syntax in
@@ -25,21 +25,6 @@ module Timing = struct
         ; vesting_increment
         ; vesting_period
         }
-end
-
-module Public_accounts = struct
-  type account_data =
-    { pk : Public_key.Compressed.t
-    ; balance : int
-    ; delegate : Public_key.Compressed.t option
-    ; timing : Timing.t
-    }
-
-  module type S = sig
-    val name : string
-
-    val accounts : account_data list Lazy.t
-  end
 end
 
 module Private_accounts = struct

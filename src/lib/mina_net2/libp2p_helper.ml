@@ -122,6 +122,7 @@ type t =
   { process : Child_processes.t
   ; logger : Logger.t
   ; mutable finished : bool
+  ; stderr_finished : unit Ivar.t
   ; outstanding_requests :
       Libp2p_ipc.rpc_response_body Or_error.t Ivar.t
       Libp2p_ipc.Sequence_number.Table.t
@@ -141,13 +142,15 @@ let handle_libp2p_helper_termination t ~pids ~killed result =
           ~metadata:
             [ ("exit_status", `String (Unix.Exit_or_signal.to_string_hum e)) ] ;
         t.finished <- true ;
+        let%map () = Ivar.read t.stderr_finished in
         raise Libp2p_helper_died_unexpectedly
     | Error err ->
         [%log' fatal t.logger]
           !"Child processes library could not track libp2p_helper process: $err"
           ~metadata:[ ("err", Error_json.error_to_yojson err) ] ;
         t.finished <- true ;
-        let%map () = Deferred.ignore_m (Child_processes.kill t.process) in
+        let%bind () = Deferred.ignore_m (Child_processes.kill t.process) in
+        let%map () = Ivar.read t.stderr_finished in
         raise Libp2p_helper_died_unexpectedly
     | Ok (Ok ()) ->
         [%log' error t.logger]
@@ -181,36 +184,44 @@ let handle_incoming_message t msg ~handle_push_message =
   in
   match msg with
   | RpcResponse rpc_response ->
-      O1trace.sync_thread "handle_libp2p_ipc_rpc_response" (fun () ->
-          let rpc_header =
-            Libp2pHelperInterface.RpcResponse.header_get rpc_response
-          in
-          let sequence_number =
-            RpcMessageHeader.sequence_number_get rpc_header
-          in
-          record_message_delay (RpcMessageHeader.time_sent_get rpc_header) ;
-          match Hashtbl.find t.outstanding_requests sequence_number with
-          | Some ivar ->
-              if Ivar.is_full ivar then
-                [%log' error t.logger]
-                  "Attempted fill outstanding libp2p_helper RPC request more \
-                   than once"
-              else
-                Ivar.fill ivar
-                  (Libp2p_ipc.rpc_response_to_or_error rpc_response)
-          | None ->
-              [%log' error t.logger]
-                "Attempted to fill outstanding libp2p_helper RPC request, but \
-                 not outstanding request was found" ) ;
-      Deferred.unit
+      Monitor.protect ~here:[%here]
+        ~finally:(fun () -> Deferred.unit)
+        (fun () ->
+          O1trace.sync_thread "handle_libp2p_ipc_rpc_response" (fun () ->
+              let rpc_header =
+                Libp2pHelperInterface.RpcResponse.header_get rpc_response
+              in
+              let sequence_number =
+                RpcMessageHeader.sequence_number_get rpc_header
+              in
+              record_message_delay (RpcMessageHeader.time_sent_get rpc_header) ;
+              match Hashtbl.find t.outstanding_requests sequence_number with
+              | Some ivar ->
+                  if Ivar.is_full ivar then
+                    [%log' error t.logger]
+                      "Attempted fill outstanding libp2p_helper RPC request \
+                       more than once"
+                  else
+                    Ivar.fill ivar
+                      (Libp2p_ipc.rpc_response_to_or_error rpc_response)
+              | None ->
+                  [%log' error t.logger]
+                    "Attempted to fill outstanding libp2p_helper RPC request, \
+                     but not outstanding request was found" ) ;
+          Deferred.unit )
   | PushMessage push_msg ->
-      O1trace.thread "handle_libp2p_ipc_push" (fun () ->
-          let push_header = DaemonInterface.PushMessage.header_get push_msg in
-          record_message_delay (PushMessageHeader.time_sent_get push_header) ;
-          handle_push_message t (DaemonInterface.PushMessage.get push_msg) )
+      Monitor.protect ~here:[%here]
+        ~finally:(fun () -> Deferred.unit)
+        (fun () ->
+          O1trace.thread "handle_libp2p_ipc_push" (fun () ->
+              let push_header =
+                DaemonInterface.PushMessage.header_get push_msg
+              in
+              record_message_delay (PushMessageHeader.time_sent_get push_header) ;
+              handle_push_message t (DaemonInterface.PushMessage.get push_msg) )
+          )
   | Undefined n ->
-      Libp2p_ipc.undefined_union ~context:"DaemonInterface.Message" n ;
-      Deferred.unit
+      Libp2p_ipc.undefined_union ~context:"DaemonInterface.Message" n
 
 let spawn ?(allow_multiple_instances = false) ~logger ~pids ~conf_dir
     ~handle_push_message () =
@@ -240,33 +251,39 @@ let spawn ?(allow_multiple_instances = false) ~logger ~pids ~conf_dir
         { process
         ; logger
         ; finished = false
+        ; stderr_finished = Ivar.create ()
         ; outstanding_requests = Libp2p_ipc.Sequence_number.Table.create ()
         }
       in
       termination_handler := handle_libp2p_helper_termination t ~pids ;
       O1trace.background_thread "handle_libp2p_helper_subprocess_logs"
         (fun () ->
-          Child_processes.stderr process
-          |> Strict_pipe.Reader.iter ~f:(fun line ->
-                 Mina_metrics.(
-                   Counter.inc_one Mina_metrics.Network.ipc_logs_received_total) ;
-                 let record_result =
-                   try
-                     Some
-                       (Go_log.record_of_yojson @@ Yojson.Safe.from_string line)
-                   with Yojson.Json_error _error -> None
-                 in
-                 ( match record_result with
-                 | Some (Ok record) ->
-                     record |> Go_log.record_to_message |> Logger.raw logger
-                 | Some (Error error) ->
-                     [%log error]
-                       "failed to parse record over libp2p_helper stderr: \
-                        $error"
-                       ~metadata:[ ("error", `String error) ]
-                 | None ->
-                     Core.print_endline line ) ;
-                 Deferred.unit ) ) ;
+          let%map () =
+            Child_processes.stderr process
+            |> Strict_pipe.Reader.iter ~f:(fun line ->
+                   Mina_metrics.(
+                     Counter.inc_one
+                       Mina_metrics.Network.ipc_logs_received_total) ;
+                   let record_result =
+                     try
+                       Some
+                         ( Go_log.record_of_yojson
+                         @@ Yojson.Safe.from_string line )
+                     with Yojson.Json_error _error -> None
+                   in
+                   ( match record_result with
+                   | Some (Ok record) ->
+                       record |> Go_log.record_to_message |> Logger.raw logger
+                   | Some (Error error) ->
+                       [%log error]
+                         "failed to parse record over libp2p_helper stderr: \
+                          $error"
+                         ~metadata:[ ("error", `String error) ]
+                   | None ->
+                       Core.print_endline line ) ;
+                   Deferred.unit )
+          in
+          Ivar.fill t.stderr_finished () ) ;
       O1trace.background_thread "handle_libp2p_ipc_incoming" (fun () ->
           Child_processes.stdout process
           |> Libp2p_ipc.read_incoming_messages
@@ -275,7 +292,9 @@ let spawn ?(allow_multiple_instances = false) ~logger ~pids ~conf_dir
                    let msg =
                      Libp2p_ipc.Reader.DaemonInterface.Message.get msg
                    in
-                   handle_incoming_message t msg ~handle_push_message
+                   if not t.finished then
+                     handle_incoming_message t msg ~handle_push_message
+                   else Deferred.unit
                | Error error ->
                    [%log error]
                      "failed to parse IPC message over libp2p_helper stdout: \
@@ -296,15 +315,23 @@ let do_rpc (type a b) (t : t) ((module Rpc) : (a, b) Libp2p_ipc.Rpcs.rpc)
     (not t.finished)
     && (not @@ Writer.is_closed (Child_processes.stdin t.process))
   then (
-    [%log' spam t.logger] "sending $message_type to libp2p_helper"
-      ~metadata:[ ("message_type", `String Rpc.name) ] ;
     let ivar = Ivar.create () in
     let sequence_number = Libp2p_ipc.Sequence_number.create () in
     Hashtbl.add_exn t.outstanding_requests ~key:sequence_number ~data:ivar ;
-    request |> Rpc.Request.to_rpc_request_body
-    |> Libp2p_ipc.create_rpc_request ~sequence_number
-    |> Libp2p_ipc.rpc_request_to_outgoing_message
-    |> Libp2p_ipc.write_outgoing_message (Child_processes.stdin t.process) ;
+    let outgoing_msg =
+      request |> Rpc.Request.to_rpc_request_body
+      |> Libp2p_ipc.create_rpc_request ~sequence_number
+      |> Libp2p_ipc.rpc_request_to_outgoing_message
+    in
+    let len =
+      Libp2p_ipc.write_outgoing_message
+        (Child_processes.stdin t.process)
+        outgoing_msg
+    in
+    [%log' trace t.logger]
+      "sent $message_type of $message_length to libp2p_helper"
+      ~metadata:
+        [ ("message_type", `String Rpc.name); ("message_length", `Int len) ] ;
     let%bind response = Ivar.read ivar in
     match Rpc.Response.of_rpc_response_body response with
     | Some r ->
@@ -315,28 +342,33 @@ let do_rpc (type a b) (t : t) ((module Rpc) : (a, b) Libp2p_ipc.Rpcs.rpc)
     Deferred.Or_error.errorf "helper process already exited (doing RPC %s)"
       Rpc.name
 
-let send_push ~msg t =
+let send_push ~name ~msg t =
   if
     (not t.finished)
     && (not @@ Writer.is_closed (Child_processes.stdin t.process))
   then
-    Libp2p_ipc.push_message_to_outgoing_message msg
-    |> Libp2p_ipc.write_outgoing_message (Child_processes.stdin t.process)
+    let len =
+      Libp2p_ipc.push_message_to_outgoing_message msg
+      |> Libp2p_ipc.write_outgoing_message (Child_processes.stdin t.process)
+    in
+    [%log' trace t.logger]
+      "sent push $message_type of $message_length to libp2p_helper"
+      ~metadata:[ ("message_type", `String name); ("message_length", `Int len) ]
 
 let send_validation ~validation_id ~validation_result =
-  send_push
+  send_push ~name:"Validation"
     ~msg:
       (Libp2p_ipc.create_validation_push_message ~validation_id
          ~validation_result )
 
-let send_add_resource ~tag ~body =
-  let open Staged_ledger_diff in
-  let tag = Body.Tag.to_enum tag in
-  let data = Body.to_binio_bigstring body |> Bigstring.to_string in
-  send_push ~msg:(Libp2p_ipc.create_add_resource_push_message ~tag ~data)
+let send_add_resource ~tag ~data =
+  let tag = Bitswap_tag.to_enum tag in
+  send_push ~name:"AddResource"
+    ~msg:(Libp2p_ipc.create_add_resource_push_message ~tag ~data)
 
 let send_heartbeat ~peer_id =
-  send_push ~msg:(Libp2p_ipc.create_heartbeat_peer_push_message ~peer_id)
+  send_push ~name:"HeartbeatPeer"
+    ~msg:(Libp2p_ipc.create_heartbeat_peer_push_message ~peer_id)
 
 let test_with_libp2p_helper ?(logger = Logger.null ())
     ?(handle_push_message = fun _ -> assert false) f =

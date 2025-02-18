@@ -2,7 +2,7 @@ open Backend
 open Pickles_types
 open Import
 module Impl = Impls.Step
-module One_hot_vector = One_hot_vector.Make (Impl)
+module One_hot_vector = One_hot_vector.Step
 
 (* Let F, K be the two fields (either (Fp, Fq) or (Fq, Fp)).
    Each proof over F has an accumulator state which contains
@@ -60,15 +60,15 @@ type ('app_state, 'max_proofs_verified, 'num_branches) t =
       ( challenge
       , scalar_challenge
       , Impl.Field.t Shifted_value.Type1.t
-      , ( ( scalar_challenge
-          , Impl.Field.t Shifted_value.Type1.t )
-          Types.Wrap.Proof_state.Deferred_values.Plonk.In_circuit.Lookup.t
+      , ( Impl.Field.t Pickles_types.Shifted_value.Type1.t
         , Impl.Boolean.var )
-        Plonk_types.Opt.t
+        Opt.t
+      , (scalar_challenge, Impl.Boolean.var) Opt.t
+      , Impl.Boolean.var
       , unit
       , Digest.Make(Impl).t
       , scalar_challenge Types.Bulletproof_challenge.t Types.Step_bp_vec.t
-      , Impl.field Branch_data.Checked.t )
+      , Branch_data.Checked.Step.t )
       Types.Wrap.Proof_state.In_circuit.t
         (** The accumulator state corresponding to the above proof. Contains
       - `deferred_values`: The values necessary for finishing the deferred "scalar field" computations.
@@ -101,23 +101,20 @@ module No_app_state = struct
 end
 
 module Constant = struct
-  open Kimchi_backend
-
   type challenge = Challenge.Constant.t
 
   type scalar_challenge = challenge Scalar_challenge.t
 
-  type ('statement, 'max_proofs_verified, _) t =
+  type ('statement, 'max_proofs_verified) t =
     { app_state : 'statement
     ; wrap_proof : Wrap_proof.Constant.t
     ; proof_state :
         ( challenge
         , scalar_challenge
         , Tick.Field.t Shifted_value.Type1.t
-        , ( scalar_challenge
-          , Tick.Field.t Shifted_value.Type1.t )
-          Types.Wrap.Proof_state.Deferred_values.Plonk.In_circuit.Lookup.t
-          option
+        , Tick.Field.t Shifted_value.Type1.t option
+        , scalar_challenge option
+        , bool
         , unit
         , Digest.Constant.t
         , scalar_challenge Types.Bulletproof_challenge.t Types.Step_bp_vec.t
@@ -133,38 +130,29 @@ module Constant = struct
   [@@deriving hlist]
 
   module No_app_state = struct
-    type nonrec (_, 'max_proofs_verified, 'num_branches) t =
-      (unit, 'max_proofs_verified, 'num_branches) t
+    type nonrec (_, 'max_proofs_verified, _) t = (unit, 'max_proofs_verified) t
   end
 end
 
-let typ (type n avar aval m) ~lookup (statement : (avar, aval) Impls.Step.Typ.t)
-    (max_proofs_verified : n Nat.t) (branches : m Nat.t) :
-    ((avar, n, m) t, (aval, n, m) Constant.t) Impls.Step.Typ.t =
+let typ (type n avar aval) ~feature_flags ~num_chunks
+    (statement : (avar, aval) Impls.Step.Typ.t) (max_proofs_verified : n Nat.t)
+    =
   let module Sc = Scalar_challenge in
   let open Impls.Step in
-  let open Step_main_inputs in
   let open Step_verifier in
-  Snarky_backendless.Typ.of_hlistable ~var_to_hlist:to_hlist
-    ~var_of_hlist:of_hlist ~value_to_hlist:Constant.to_hlist
-    ~value_of_hlist:Constant.of_hlist
+  Impls.Step.Typ.of_hlistable ~var_to_hlist:to_hlist ~var_of_hlist:of_hlist
+    ~value_to_hlist:Constant.to_hlist ~value_of_hlist:Constant.of_hlist
     [ statement
     ; Wrap_proof.typ
-    ; Types.Wrap.Proof_state.In_circuit.typ
-        (module Impl)
-        ~challenge:Challenge.typ ~scalar_challenge:Challenge.typ ~lookup
-        ~dummy_scalar:(Shifted_value.Type1.Shifted_value Field.Constant.zero)
+    ; Types.Wrap.Proof_state.In_circuit.typ ~challenge:Challenge.typ
+        ~scalar_challenge:Challenge.typ ~feature_flags
         ~dummy_scalar_challenge:(Sc.create Limb_vector.Challenge.Constant.zero)
         (Shifted_value.Type1.typ Field.typ)
-        (Snarky_backendless.Typ.unit ())
-        Digest.typ
-        (Branch_data.typ
-           (module Impl)
-           ~assert_16_bits:(Step_verifier.assert_n_bits ~n:16) )
-    ; Plonk_types.All_evals.typ
-        (module Impl)
+        Impls.Step.Typ.unit Digest.typ
+        (Branch_data.typ ~assert_16_bits:(Step_verifier.assert_n_bits ~n:16))
+    ; Plonk_types.All_evals.typ ~num_chunks
         (* Assume we have lookup iff we have runtime tables *)
-        { lookup; runtime = lookup }
+        feature_flags
     ; Vector.typ (Vector.typ Field.typ Tick.Rounds.n) max_proofs_verified
     ; Vector.typ Inner_curve.typ max_proofs_verified
     ]

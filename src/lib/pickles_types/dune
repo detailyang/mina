@@ -1,5 +1,4 @@
 (library
- (inline_tests)
  (name pickles_types)
  (public_name pickles_types)
  ; Deactivated warnings
@@ -22,19 +21,22 @@
    ppx_jane
    ppx_deriving.std
    h_list.ppx))
- (modules_without_implementation sigs poly_types)
  (instrumentation
   (backend bisect_ppx))
  (libraries
-   ;; opam libraries
-  ppx_inline_test.config
+  ;; opam libraries
   sexplib0
   result
   core_kernel
   base.caml
   bin_prot.shape
   ;; local libraries
+  kimchi_types
+  kimchi_backend_common
+  kimchi_pasta_snarky_backend
+  plonkish_prelude
   snarky.backendless
   tuple_lib
   ppx_version.runtime
-  ))
+  bounded_types
+  mina_wire_types))

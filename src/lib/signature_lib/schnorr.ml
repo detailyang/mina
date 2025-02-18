@@ -1,5 +1,3 @@
-[%%import "/src/config.mlh"]
-
 module Bignum_bigint = Bigint
 open Core_kernel
 
@@ -12,7 +10,12 @@ module type Message_intf = sig
 
   type curve_scalar
 
-  val derive : t -> private_key:curve_scalar -> public_key:curve -> curve_scalar
+  val derive :
+       ?signature_kind:Mina_signature_kind.t
+    -> t
+    -> private_key:curve_scalar
+    -> public_key:curve
+    -> curve_scalar
 
   val derive_for_mainnet :
     t -> private_key:curve_scalar -> public_key:curve -> curve_scalar
@@ -20,13 +23,16 @@ module type Message_intf = sig
   val derive_for_testnet :
     t -> private_key:curve_scalar -> public_key:curve -> curve_scalar
 
-  val hash : t -> public_key:curve -> r:field -> curve_scalar
+  val hash :
+       ?signature_kind:Mina_signature_kind.t
+    -> t
+    -> public_key:curve
+    -> r:field
+    -> curve_scalar
 
   val hash_for_mainnet : t -> public_key:curve -> r:field -> curve_scalar
 
   val hash_for_testnet : t -> public_key:curve -> r:field -> curve_scalar
-
-  [%%ifdef consensus_mechanism]
 
   type field_var
 
@@ -42,11 +48,7 @@ module type Message_intf = sig
 
   val hash_checked :
     var -> public_key:curve_var -> r:field_var -> curve_scalar_var checked
-
-  [%%endif]
 end
-
-[%%ifdef consensus_mechanism]
 
 module type S = sig
   module Impl : Snarky_backendless.Snark_intf.S
@@ -226,46 +228,19 @@ module Make
     in
     (* TODO: Once we switch to implicit sign-bit we'll have to conditionally negate d_prime. *)
     let d = d_prime in
-    let derive =
-      let open Mina_signature_kind in
-      match signature_kind with
-      | None ->
-          Message.derive
-      | Some Mainnet ->
-          Message.derive_for_mainnet
-      | Some Testnet ->
-          Message.derive_for_testnet
-    in
+    let derive = Message.derive ?signature_kind in
     let k_prime = derive m ~public_key ~private_key:d in
     assert (not Curve.Scalar.(equal k_prime zero)) ;
     let r, ry = Curve.(to_affine_exn (scale Curve.one k_prime)) in
     let k = if is_even ry then k_prime else Curve.Scalar.negate k_prime in
-    let hash =
-      let open Mina_signature_kind in
-      match signature_kind with
-      | None ->
-          Message.hash
-      | Some Mainnet ->
-          Message.hash_for_mainnet
-      | Some Testnet ->
-          Message.hash_for_testnet
-    in
+    let hash = Message.hash ?signature_kind in
     let e = hash m ~public_key ~r in
     let s = Curve.Scalar.(k + (e * d)) in
     (r, s)
 
   let verify ?signature_kind ((r, s) : Signature.t) (pk : Public_key.t)
       (m : Message.t) =
-    let hash =
-      let open Mina_signature_kind in
-      match signature_kind with
-      | None ->
-          Message.hash
-      | Some Mainnet ->
-          Message.hash_for_mainnet
-      | Some Testnet ->
-          Message.hash_for_testnet
-    in
+    let hash = Message.hash ?signature_kind in
     let e = hash ~public_key:pk ~r m in
     let r_pt = Curve.(scale one s + negate (scale pk e)) in
     match Curve.to_affine_exn r_pt with
@@ -273,17 +248,6 @@ module Make
         is_even ry && Field.equal rx r
     | exception _ ->
         false
-
-  [%%if call_logger]
-
-  let verify s pk m =
-    Mina_debug.Call_logger.record_call "Signature_lib.Schnorr.verify" ;
-    if Random.int 1000 = 0 then (
-      print_endline "SCHNORR BACKTRACE:" ;
-      Printexc.print_backtrace stdout ) ;
-    verify s pk m
-
-  [%%endif]
 
   module Checked = struct
     let to_bits x =
@@ -331,168 +295,14 @@ module Make
   end
 end
 
-[%%else]
-
-(* nonconsensus version of the functor; yes, there's some repeated code,
-   but seems difficult to abstract over the functors and signatures
-*)
-
-module type S = sig
-  open Snark_params.Tick
-
-  type curve
-
-  type curve_scalar
-
-  module Message :
-    Message_intf
-      with type curve_scalar := curve_scalar
-       and type curve := curve
-       and type field := Field.t
-
-  module Signature : sig
-    type t = Field.t * curve_scalar [@@deriving sexp]
-  end
-
-  module Private_key : sig
-    type t = curve_scalar [@@deriving sexp]
-  end
-
-  module Public_key : sig
-    type t = curve [@@deriving sexp]
-  end
-
-  val sign :
-       ?signature_kind:Mina_signature_kind.t
-    -> Private_key.t
-    -> Message.t
-    -> Signature.t
-
-  val verify :
-       ?signature_kind:Mina_signature_kind.t
-    -> Signature.t
-    -> Public_key.t
-    -> Message.t
-    -> bool
-end
-
-module Make
-    (Impl : module type of Snark_params.Tick) (Curve : sig
-      open Impl
-
-      module Scalar : sig
-        type t [@@deriving sexp, equal]
-
-        val zero : t
-
-        val ( * ) : t -> t -> t
-
-        val ( + ) : t -> t -> t
-
-        val negate : t -> t
-      end
-
-      type t [@@deriving sexp]
-
-      val one : t
-
-      val ( + ) : t -> t -> t
-
-      val negate : t -> t
-
-      val scale : t -> Scalar.t -> t
-
-      val to_affine_exn : t -> Field.t * Field.t
-    end)
-    (Message : Message_intf
-                 with type curve := Curve.t
-                  and type curve_scalar := Curve.Scalar.t
-                  and type field := Impl.Field.t) :
-  S
-    with type curve := Curve.t
-     and type curve_scalar := Curve.Scalar.t
-     and module Message := Message = struct
-  module Private_key = struct
-    type t = Curve.Scalar.t [@@deriving sexp]
-  end
-
-  module Signature = struct
-    type t = Impl.Field.t * Curve.Scalar.t [@@deriving sexp]
-  end
-
-  module Public_key : sig
-    type t = Curve.t [@@deriving sexp]
-  end =
-    Curve
-
-  let is_even (t : Impl.Field.t) = not @@ Impl.Field.parity t
-
-  let sign ?signature_kind (d_prime : Private_key.t) m =
-    let public_key =
-      (* TODO: Don't recompute this. *)
-      Curve.scale Curve.one d_prime
-    in
-    (* TODO: Once we switch to implicit sign-bit we'll have to conditionally negate d_prime. *)
-    let d = d_prime in
-    let derive =
-      let open Mina_signature_kind in
-      match signature_kind with
-      | None ->
-          Message.derive
-      | Some Mainnet ->
-          Message.derive_for_mainnet
-      | Some Testnet ->
-          Message.derive_for_testnet
-    in
-    let k_prime = derive m ~public_key ~private_key:d in
-    assert (not Curve.Scalar.(equal k_prime zero)) ;
-    let r, (ry : Impl.Field.t) =
-      Curve.(to_affine_exn (scale Curve.one k_prime))
-    in
-    let k = if is_even ry then k_prime else Curve.Scalar.negate k_prime in
-    let hash =
-      let open Mina_signature_kind in
-      match signature_kind with
-      | None ->
-          Message.hash
-      | Some Mainnet ->
-          Message.hash_for_mainnet
-      | Some Testnet ->
-          Message.hash_for_testnet
-    in
-    let e = hash m ~public_key ~r in
-    let s = Curve.Scalar.(k + (e * d)) in
-    (r, s)
-
-  let verify ?signature_kind ((r, s) : Signature.t) (pk : Public_key.t)
-      (m : Message.t) =
-    let hash =
-      let open Mina_signature_kind in
-      match signature_kind with
-      | None ->
-          Message.hash
-      | Some Mainnet ->
-          Message.hash_for_mainnet
-      | Some Testnet ->
-          Message.hash_for_testnet
-    in
-    let e = hash ~public_key:pk ~r m in
-    let r_pt = Curve.(scale one s + negate (scale pk e)) in
-    match Curve.to_affine_exn r_pt with
-    | rx, ry ->
-        is_even ry && Impl.Field.(equal rx r)
-    | exception _ ->
-        false
-end
-
-[%%endif]
-
 open Snark_params
 
 module Message = struct
-  let network_id_mainnet = Char.of_int_exn 1
+  let network_id_mainnet = String.of_char @@ Char.of_int_exn 1
 
-  let network_id_testnet = Char.of_int_exn 0
+  let network_id_testnet = String.of_char @@ Char.of_int_exn 0
+
+  let network_id_other chain_name = chain_name
 
   let network_id =
     match Mina_signature_kind.t with
@@ -500,6 +310,8 @@ module Message = struct
         network_id_mainnet
     | Testnet ->
         network_id_testnet
+    | Other_network chain_name ->
+        network_id_other chain_name
 
   module Legacy = struct
     open Tick
@@ -513,8 +325,7 @@ module Message = struct
           { field_elements = [| x; y |]
           ; bitstrings =
               [| Tock.Field.unpack private_key
-               ; Fold_lib.Fold.(
-                   to_list (string_bits (String.of_char network_id)))
+               ; Fold_lib.Fold.(to_list (string_bits network_id))
               |]
           }
       in
@@ -524,7 +335,16 @@ module Message = struct
       |> Fn.flip List.take (Int.min 256 (Tock.Field.size_in_bits - 1))
       |> Tock.Field.project
 
-    let derive = make_derive ~network_id
+    let derive ?(signature_kind = Mina_signature_kind.t) =
+      make_derive
+        ~network_id:
+          ( match signature_kind with
+          | Mainnet ->
+              network_id_mainnet
+          | Testnet ->
+              network_id_testnet
+          | Other_network chain_name ->
+              network_id_other chain_name )
 
     let derive_for_mainnet = make_derive ~network_id:network_id_mainnet
 
@@ -541,15 +361,14 @@ module Message = struct
       |> Digest.to_bits ~length:Field.size_in_bits
       |> Inner_curve.Scalar.of_bits
 
-    let hash = make_hash ~init:Hash_prefix_states.signature_legacy
+    let hash ?signature_kind =
+      make_hash ~init:(Hash_prefix_states.signature_legacy ?signature_kind)
 
     let hash_for_mainnet =
       make_hash ~init:Hash_prefix_states.signature_for_mainnet_legacy
 
     let hash_for_testnet =
       make_hash ~init:Hash_prefix_states.signature_for_testnet_legacy
-
-    [%%ifdef consensus_mechanism]
 
     type var = (Field.Var.t, Boolean.var) Random_oracle.Input.Legacy.t
 
@@ -561,11 +380,11 @@ module Message = struct
       in
       make_checked (fun () ->
           let open Random_oracle.Legacy.Checked in
-          hash ~init:Hash_prefix_states.signature_legacy (pack_input input)
+          hash
+            ~init:(Hash_prefix_states.signature_legacy ?signature_kind:None)
+            (pack_input input)
           |> Digest.to_bits ~length:Field.size_in_bits
           |> Bitstring_lib.Bitstring.Lsb_first.of_list )
-
-    [%%endif]
   end
 
   module Chunked = struct
@@ -576,9 +395,7 @@ module Message = struct
     let make_derive ~network_id t ~private_key ~public_key =
       let input =
         let x, y = Tick.Inner_curve.to_affine_exn public_key in
-        let id =
-          Fold_lib.Fold.(to_list (string_bits (String.of_char network_id)))
-        in
+        let id = Fold_lib.Fold.(to_list (string_bits network_id)) in
         Random_oracle.Input.Chunked.append t
           { field_elements =
               [| x; y; Field.project (Tock.Field.unpack private_key) |]
@@ -592,7 +409,16 @@ module Message = struct
       |> Fn.flip List.take (Int.min 256 (Tock.Field.size_in_bits - 1))
       |> Tock.Field.project
 
-    let derive = make_derive ~network_id
+    let derive ?(signature_kind = Mina_signature_kind.t) =
+      make_derive
+        ~network_id:
+          ( match signature_kind with
+          | Mainnet ->
+              network_id_mainnet
+          | Testnet ->
+              network_id_testnet
+          | Other_network chain_name ->
+              network_id_other chain_name )
 
     let derive_for_mainnet = make_derive ~network_id:network_id_mainnet
 
@@ -609,15 +435,14 @@ module Message = struct
       |> Digest.to_bits ~length:Field.size_in_bits
       |> Inner_curve.Scalar.of_bits
 
-    let hash = make_hash ~init:Hash_prefix_states.signature
+    let hash ?signature_kind =
+      make_hash ~init:(Hash_prefix_states.signature ?signature_kind)
 
     let hash_for_mainnet =
       make_hash ~init:Hash_prefix_states.signature_for_mainnet
 
     let hash_for_testnet =
       make_hash ~init:Hash_prefix_states.signature_for_testnet
-
-    [%%ifdef consensus_mechanism]
 
     type var = Field.Var.t Random_oracle.Input.Chunked.t
 
@@ -629,18 +454,16 @@ module Message = struct
       in
       make_checked (fun () ->
           let open Random_oracle.Checked in
-          hash ~init:Hash_prefix_states.signature (pack_input input)
+          hash
+            ~init:(Hash_prefix_states.signature ?signature_kind:None)
+            (pack_input input)
           |> Digest.to_bits ~length:Field.size_in_bits
           |> Bitstring_lib.Bitstring.Lsb_first.of_list )
-
-    [%%endif]
   end
 end
 
 module Legacy = Make (Tick) (Tick.Inner_curve) (Message.Legacy)
 module Chunked = Make (Tick) (Tick.Inner_curve) (Message.Chunked)
-
-[%%ifdef consensus_mechanism]
 
 let gen_legacy =
   let open Quickcheck.Let_syntax in
@@ -734,5 +557,3 @@ let%test_unit "schnorr checked + unchecked" =
            Chunked.Checked.verifies (module Shifted) s public_key msg )
          (fun _ -> true) )
         (pubkey, msg, s) )
-
-[%%endif]
