@@ -11,31 +11,79 @@ module M = struct
     end
   end
 
+  module Wrap_wire_proof = struct
+    type 'a columns_vec = ('a, Pickles_types.Nat.fifteen) Pickles_types.Vector.t
+
+    type 'a quotient_polynomial_vec =
+      ('a, Pickles_types.Nat.seven) Pickles_types.Vector.t
+
+    type 'a permuts_minus_1_vec =
+      ('a, Pickles_types.Nat.six) Pickles_types.Vector.t
+
+    module Commitments = struct
+      module V1 = struct
+        type t =
+          { w_comm : (Pasta_bindings.Fp.t * Pasta_bindings.Fp.t) columns_vec
+          ; z_comm : Pasta_bindings.Fp.t * Pasta_bindings.Fp.t
+          ; t_comm :
+              (Pasta_bindings.Fp.t * Pasta_bindings.Fp.t)
+              quotient_polynomial_vec
+          }
+      end
+    end
+
+    module Evaluations = struct
+      module V1 = struct
+        type t =
+          { w : (Pasta_bindings.Fq.t * Pasta_bindings.Fq.t) columns_vec
+          ; coefficients :
+              (Pasta_bindings.Fq.t * Pasta_bindings.Fq.t) columns_vec
+          ; z : Pasta_bindings.Fq.t * Pasta_bindings.Fq.t
+          ; s : (Pasta_bindings.Fq.t * Pasta_bindings.Fq.t) permuts_minus_1_vec
+          ; generic_selector : Pasta_bindings.Fq.t * Pasta_bindings.Fq.t
+          ; poseidon_selector : Pasta_bindings.Fq.t * Pasta_bindings.Fq.t
+          ; complete_add_selector : Pasta_bindings.Fq.t * Pasta_bindings.Fq.t
+          ; mul_selector : Pasta_bindings.Fq.t * Pasta_bindings.Fq.t
+          ; emul_selector : Pasta_bindings.Fq.t * Pasta_bindings.Fq.t
+          ; endomul_scalar_selector : Pasta_bindings.Fq.t * Pasta_bindings.Fq.t
+          }
+      end
+    end
+
+    module V1 = struct
+      type t =
+        { commitments : Commitments.V1.t
+        ; evaluations : Evaluations.V1.t
+        ; ft_eval1 : Pasta_bindings.Fq.t
+        ; bulletproof :
+            ( Pasta_bindings.Fp.t * Pasta_bindings.Fp.t
+            , Pasta_bindings.Fq.t )
+            Pickles_types.Plonk_types.Openings.Bulletproof.V1.t
+        }
+    end
+  end
+
   module Proof = struct
     type challenge_constant =
-      Pickles_limb_vector.Constant.Make(Pickles_types.Nat.N2).t
+      Pickles_types.Nat.two Pickles_limb_vector.Constant.t
 
     type tock_affine = Pasta_bindings.Fp.t * Pasta_bindings.Fp.t
 
-    type 'a step_bp_vec = 'a Kimchi_pasta.Basic.Rounds.Step_vector.Stable.V1.t
+    type 'a step_bp_vec = ('a, Pickles_types.Nat.sixteen) Pickles_types.Vector.t
 
     module Base = struct
       module Wrap = struct
         module V2 = struct
           type digest_constant =
-            Pickles_limb_vector.Constant.Make(Pickles_types.Nat.N4).t
-
-          type tock_proof =
-            ( tock_affine
-            , Pasta_bindings.Fq.t
-            , Pasta_bindings.Fq.t array )
-            Pickles_types.Plonk_types.Proof.Stable.V2.t
+            Pickles_types.Nat.four Pickles_limb_vector.Constant.t
 
           type ('messages_for_next_wrap_proof, 'messages_for_next_step_proof) t =
             { statement :
                 ( challenge_constant
                 , challenge_constant Kimchi_types.scalar_challenge
-                , Snark_params.Tick.Field.t Pickles_types.Shifted_value.Type1.t
+                , Snark_params.Tick.Field.t
+                  Pickles_types.Shifted_value.Type1.V1.t
+                , bool
                 , 'messages_for_next_wrap_proof
                 , digest_constant
                 , 'messages_for_next_step_proof
@@ -47,8 +95,12 @@ module M = struct
             ; prev_evals :
                 ( Snark_params.Tick.Field.t
                 , Snark_params.Tick.Field.t array )
-                Pickles_types.Plonk_types.All_evals.t
-            ; proof : tock_proof
+                Pickles_types.Plonk_types.All_evals.V1.t
+                  (* A job half-done may be worse than not done at all.
+                     TODO: Migrate Plonk_types here, and actually include the
+                     *wire* type, not this in-memory version.
+                  *)
+            ; proof : Wrap_wire_proof.V1.t
             }
         end
       end
@@ -73,7 +125,7 @@ module M = struct
 
     module Proofs_verified_2 = struct
       module V2 = struct
-        type nonrec t = (Pickles_types.Nat.N2.n, Pickles_types.Nat.N2.n) t
+        type nonrec t = (Pickles_types.Nat.two, Pickles_types.Nat.two) t
       end
     end
   end
@@ -100,7 +152,9 @@ module M = struct
           Pickles_base.Side_loaded_verification_key.Poly.V2.t
       end
 
-      module Max_width = Pickles_types.Nat.N2
+      module Max_width = struct
+        type n = Pickles_types.Nat.two
+      end
     end
 
     module Proof = struct
@@ -119,14 +173,16 @@ module Types = struct
 
       module Proofs_verified_2 : sig
         module V2 : sig
-          type nonrec t = (Pickles_types.Nat.N2.n, Pickles_types.Nat.N2.n) t
+          type nonrec t = (Pickles_types.Nat.two, Pickles_types.Nat.two) t
         end
       end
     end
 
     module Side_loaded : sig
       module Verification_key : sig
-        module Max_width : module type of Pickles_types.Nat.N2
+        module Max_width : sig
+          type n = Pickles_types.Nat.two
+        end
 
         module V2 : sig
           type t

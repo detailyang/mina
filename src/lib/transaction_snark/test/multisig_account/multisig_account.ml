@@ -10,7 +10,11 @@ module Impl = Pickles.Impls.Step
 
 let%test_module "multisig_account" =
   ( module struct
-    let constraint_constants = U.constraint_constants
+    let proof_cache =
+      Result.ok_or_failwith @@ Pickles.Proof_cache.of_yojson
+      @@ Yojson.Safe.from_file "proof_cache.json"
+
+    let () = Transaction_snark.For_tests.set_proof_cache proof_cache
 
     module M_of_n_predicate = struct
       type _witness = (Schnorr.Chunked.Signature.t * Public_key.t) list
@@ -210,19 +214,17 @@ let%test_module "multisig_account" =
                         ; public_output = ()
                         ; auxiliary_output = ()
                         } )
-                  ; uses_lookup = false
+                  ; feature_flags = Pickles_types.Plonk_types.Features.none_bool
                   }
                 in
-                Pickles.compile () ~cache:Cache_dir.cache
+                Pickles.compile () ~cache:Cache_dir.cache ~proof_cache
+                  ~override_wrap_domain:Pickles_base.Proofs_verified.N1
                   ~public_input:(Input Zkapp_statement.typ)
                   ~auxiliary_typ:Typ.unit
                   ~branches:(module Nat.N2)
                   ~max_proofs_verified:(module Nat.N2)
                     (* You have to put 2 here... *)
                   ~name:"multisig"
-                  ~constraint_constants:
-                    (Genesis_constants.Constraint_constants.to_snark_keys_header
-                       constraint_constants )
                   ~choices:(fun ~self ->
                     [ multisig_rule
                     ; { identifier = "dummy"
@@ -238,7 +240,7 @@ let%test_module "multisig_account" =
                                   assert false )
                             in
                             let proof =
-                              Run.exists (Typ.Internal.ref ())
+                              Run.exists (Typ.prover_value ())
                                 ~compute:(fun () -> assert false)
                             in
                             Impl.run_checked
@@ -258,11 +260,15 @@ let%test_module "multisig_account" =
                             ; public_output = ()
                             ; auxiliary_output = ()
                             } )
-                      ; uses_lookup = false
+                      ; feature_flags =
+                          Pickles_types.Plonk_types.Features.none_bool
                       }
                     ] )
               in
-              let vk = Pickles.Side_loaded.Verification_key.of_compiled tag in
+              let vk =
+                Async.Thread_safe.block_on_async_exn (fun () ->
+                    Pickles.Side_loaded.Verification_key.of_compiled tag )
+              in
               let { Mina_transaction_logic.For_tests.Transaction_spec.fee
                   ; sender = sender, sender_nonce
                   ; receiver = multisig_account_pk
@@ -338,10 +344,13 @@ let%test_module "multisig_account" =
                     ; preconditions =
                         { Account_update.Preconditions.network =
                             Zkapp_precondition.Protocol_state.accept
-                        ; account = Nonce (Account.Nonce.succ sender_nonce)
+                        ; account =
+                            Zkapp_precondition.Account.nonce
+                              (Account.Nonce.succ sender_nonce)
+                        ; valid_while = Ignore
                         }
                     ; use_full_commitment = false
-                    ; caller = Call
+                    ; may_use_token = No
                     ; authorization_kind = Signature
                     }
                 ; authorization = Signature Signature.dummy
@@ -363,13 +372,15 @@ let%test_module "multisig_account" =
                     ; preconditions =
                         { Account_update.Preconditions.network =
                             Zkapp_precondition.Protocol_state.accept
-                        ; account = Full Zkapp_precondition.Account.accept
+                        ; account = Zkapp_precondition.Account.accept
+                        ; valid_while = Ignore
                         }
                     ; use_full_commitment = false
-                    ; caller = Call
-                    ; authorization_kind = Proof
+                    ; may_use_token = No
+                    ; authorization_kind = Proof (With_hash.hash vk)
                     }
-                ; authorization = Proof Mina_base.Proof.transaction_dummy
+                ; authorization =
+                    Proof (Lazy.force Mina_base.Proof.transaction_dummy)
                 }
               in
               let memo = Signed_command_memo.empty in
@@ -378,7 +389,7 @@ let%test_module "multisig_account" =
                   ~account_update_depth:(fun (p : Account_update.Simple.t) ->
                     p.body.call_depth )
                   [ sender_account_update_data; snapp_account_update_data ]
-                |> Zkapp_command.Call_forest.add_callers_simple
+                |> Zkapp_command.Call_forest.map ~f:Account_update.of_simple
                 |> Zkapp_command.Call_forest.accumulate_hashes_predicated
               in
               let account_updates_hash = Zkapp_command.Call_forest.hash ps in
@@ -390,9 +401,7 @@ let%test_module "multisig_account" =
               let tx_statement : Zkapp_statement.t =
                 { account_update =
                     Account_update.Body.digest
-                      (Zkapp_command.add_caller_simple snapp_account_update_data
-                         Token_id.default )
-                        .body
+                      (Account_update.of_simple snapp_account_update_data).body
                 ; calls = (Zkapp_command.Digest.Forest.empty :> field)
                 }
               in
@@ -461,7 +470,13 @@ let%test_module "multisig_account" =
                   }
               in
               Init_ledger.init (module Ledger.Ledger_inner) init_ledger ledger ;
-              ignore
-                ( U.apply_zkapp_command ledger [ zkapp_command ]
-                  : Sparse_ledger.t ) ) )
+              Async.Thread_safe.block_on_async_exn (fun () ->
+                  U.check_zkapp_command_with_merges_exn ledger [ zkapp_command ] ) ) )
+
+    let () =
+      match Sys.getenv "PROOF_CACHE_OUT" with
+      | Some path ->
+          Yojson.Safe.to_file path @@ Pickles.Proof_cache.to_yojson proof_cache
+      | None ->
+          ()
   end )

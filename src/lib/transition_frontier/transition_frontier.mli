@@ -14,7 +14,7 @@ module Extensions = Extensions
 module Persistent_root = Persistent_root
 module Persistent_frontier = Persistent_frontier
 module Root_data = Root_data
-module Catchup_tree = Catchup_tree
+module Catchup_state = Catchup_state
 module Full_catchup_tree = Full_catchup_tree
 module Catchup_hash_tree = Catchup_hash_tree
 
@@ -26,6 +26,8 @@ module type CONTEXT = sig
   val constraint_constants : Genesis_constants.Constraint_constants.t
 
   val consensus_constants : Consensus.Constants.t
+
+  val proof_cache_db : Proof_cache_tag.cache_db
 end
 
 include Frontier_intf.S
@@ -36,12 +38,23 @@ type Structured_log_events.t += Added_breadcrumb_user_commands
 type Structured_log_events.t += Applying_diffs of { diffs : Yojson.Safe.t list }
   [@@deriving register_event]
 
+type Structured_log_events.t += Transition_frontier_loaded_from_persistence
+  [@@deriving register_event]
+
 type Structured_log_events.t += Persisted_frontier_loaded
+  [@@deriving register_event]
+
+type Structured_log_events.t += Persisted_frontier_fresh_boot
+  [@@deriving register_event]
+
+type Structured_log_events.t += Bootstrap_required [@@deriving register_event]
+
+type Structured_log_events.t += Persisted_frontier_dropped
   [@@deriving register_event]
 
 val max_catchup_chunk_length : int
 
-val catchup_tree : t -> Catchup_tree.t
+val catchup_state : t -> Catchup_state.t
 
 (* This is the max length which is used when the transition frontier is initialized
  * via `load`. In other words, this will always be the max length of the transition

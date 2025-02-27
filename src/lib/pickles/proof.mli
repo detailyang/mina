@@ -1,3 +1,7 @@
+(** The type of intermediate (step) and emitted (wrap) proofs that pickles
+    generates
+*)
+
 module Base : sig
   module Messages_for_next_proof_over_same_field =
     Reduced_messages_for_next_proof_over_same_field
@@ -17,18 +21,17 @@ module Base : sig
           Import.Types.Step.Statement.t
       ; index : int
       ; prev_evals : 'prev_evals
-      ; proof : Backend.Tick.Proof.t
+      ; proof : Backend.Tick.Proof.with_public_evals
       }
   end
 
   module Wrap : sig
     [%%versioned:
     module Stable : sig
+      [@@@no_toplevel_latest_type]
+
       module V2 : sig
         type ('messages_for_next_wrap_proof, 'messages_for_next_step_proof) t =
-              ( 'messages_for_next_wrap_proof
-              , 'messages_for_next_step_proof )
-              Mina_wire_types.Pickles.Concrete_.Proof.Base.Wrap.V2.t =
           { statement :
               ( Limb_vector.Constant.Hex64.Stable.V1.t
                 Pickles_types.Vector.Vector_2.Stable.V1.t
@@ -37,6 +40,7 @@ module Base : sig
                 Import.Scalar_challenge.Stable.V2.t
               , Backend.Tick.Field.Stable.V1.t
                 Pickles_types.Shifted_value.Type1.Stable.V1.t
+              , bool
               , 'messages_for_next_wrap_proof
               , Import.Digest.Constant.Stable.V1.t
               , 'messages_for_next_step_proof
@@ -51,20 +55,25 @@ module Base : sig
               ( Backend.Tick.Field.Stable.V1.t
               , Backend.Tick.Field.Stable.V1.t array )
               Pickles_types.Plonk_types.All_evals.Stable.V1.t
-          ; proof : Backend.Tock.Proof.Stable.V2.t
+          ; proof : Wrap_wire_proof.Stable.V1.t
           }
-        [@@deriving compare, sexp, yojson, hash, equal]
+        [@@deriving compare, sexp, hash, equal]
       end
     end]
 
     type ('messages_for_next_wrap_proof, 'messages_for_next_step_proof) t =
-          ( 'messages_for_next_wrap_proof
-          , 'messages_for_next_step_proof )
-          Stable.Latest.t =
+          (* NB: This should be on the *serialized type*. However, the actual
+             serialized type [Repr.t] is hidden by this module, so this alias is
+             effectively junk anyway..
+          *)
+      ( 'messages_for_next_wrap_proof
+      , 'messages_for_next_step_proof )
+      Mina_wire_types.Pickles.Concrete_.Proof.Base.Wrap.V2.t =
       { statement :
           ( Import.Challenge.Constant.t
           , Import.Challenge.Constant.t Import.Scalar_challenge.t
           , Backend.Tick.Field.t Pickles_types.Shifted_value.Type1.t
+          , bool
           , 'messages_for_next_wrap_proof
           , Import.Digest.Constant.t
           , 'messages_for_next_step_proof
@@ -77,7 +86,7 @@ module Base : sig
           ( Backend.Tick.Field.t
           , Backend.Tick.Field.t array )
           Pickles_types.Plonk_types.All_evals.t
-      ; proof : Backend.Tock.Proof.t
+      ; proof : Wrap_wire_proof.Stable.V1.t
       }
     [@@deriving compare, sexp, yojson, hash, equal]
   end
@@ -129,7 +138,7 @@ module Make (W : Pickles_types.Nat.Intf) (MLMB : Pickles_types.Nat.Intf) : sig
           Import.Step_bp_vec.t
           Max_proofs_verified_at_most.t )
         Base.Messages_for_next_proof_over_same_field.Step.t )
-      Base.Wrap.t
+      Base.Wrap.Stable.V2.t
     [@@deriving compare, sexp, yojson, hash, equal]
   end
 
@@ -141,7 +150,7 @@ module Make (W : Pickles_types.Nat.Intf) (MLMB : Pickles_types.Nat.Intf) : sig
 
   val to_yojson : t -> [> `String of string ]
 
-  val to_yojson_full : t Pickles_types.Sigs.jsonable
+  val to_yojson_full : t Plonkish_prelude.Sigs.jsonable
 
   val of_yojson : [> `String of string ] -> (t, string) result
 end
@@ -154,9 +163,9 @@ module Proofs_verified_2 : sig
     module V2 : sig
       include module type of T with module Repr := T.Repr
 
-      include Pickles_types.Sigs.VERSIONED
+      include Plonkish_prelude.Sigs.VERSIONED
 
-      include Pickles_types.Sigs.Binable.S with type t := t
+      include Plonkish_prelude.Sigs.Binable.S with type t := t
     end
   end]
 
@@ -175,9 +184,9 @@ module Proofs_verified_max : sig
     module V2 : sig
       include module type of T with module Repr := T.Repr
 
-      include Pickles_types.Sigs.VERSIONED
+      include Plonkish_prelude.Sigs.VERSIONED
 
-      include Pickles_types.Sigs.Binable.S with type t := t
+      include Plonkish_prelude.Sigs.Binable.S with type t := t
     end
   end]
 

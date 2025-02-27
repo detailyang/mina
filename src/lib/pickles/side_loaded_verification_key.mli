@@ -1,3 +1,7 @@
+(** A homogenized verification key type, used to 'side load' and verify any
+    pickles proof regardless of its original structure.
+*)
+
 module V = Pickles_base.Side_loaded_verification_key
 
 include
@@ -39,13 +43,9 @@ end
 
 module Checked : sig
   type t =
-    { max_proofs_verified :
-        Step_main_inputs.Impl.field
-        Pickles_base.Proofs_verified.One_hot.Checked.t
+    { max_proofs_verified : Pickles_base.Proofs_verified.One_hot.Checked.t
           (** The maximum of all of the [step_widths]. *)
-    ; actual_wrap_domain_size :
-        Step_main_inputs.Impl.field
-        Pickles_base.Proofs_verified.One_hot.Checked.t
+    ; actual_wrap_domain_size : Pickles_base.Proofs_verified.One_hot.Checked.t
           (** The actual domain size used by the wrap circuit. *)
     ; wrap_index :
         Step_main_inputs.Inner_curve.t
@@ -57,14 +57,14 @@ module Checked : sig
   [@@deriving hlist, fields]
 
   val to_input :
-       t
-    -> Pasta_bindings.Fp.t Snarky_backendless.Cvar.t
-       Random_oracle_input.Chunked.t
+    t -> Step_main_inputs.Impl.Field.t Random_oracle_input.Chunked.t
 end
 
 module Vk : sig
   type t = (Impls.Wrap.Verification_key.t[@sexp.opaque]) [@@deriving sexp]
 end
+
+[@@@warning "-32"]
 
 [%%versioned:
 module Stable : sig

@@ -1,20 +1,19 @@
-val add_fast :
-     (module Snarky_backendless.Snark_intf.Run with type field = 'f)
-  -> ?check_finite:bool
-  -> 'f Snarky_backendless.Cvar.t * 'f Snarky_backendless.Cvar.t
-  -> 'f Snarky_backendless.Cvar.t * 'f Snarky_backendless.Cvar.t
-  -> 'f Snarky_backendless.Cvar.t * 'f Snarky_backendless.Cvar.t
-
-module Make
-    (Impl : Snarky_backendless.Snark_intf.Run)
-    (G : Intf.Group(Impl).S with type t = Impl.Field.t * Impl.Field.t) : sig
-  type var := Impl.field Snarky_backendless.Cvar.t
-
-  type pair := var Tuple_lib.Double.t
+module Make_add (Impl : Kimchi_pasta_snarky_backend.Snark_intf) : sig
+  type pair := Impl.Field.t Tuple_lib.Double.t
 
   val seal : pair -> pair
 
-  val add_fast : ?check_finite:bool -> var * var -> var * var -> var * var
+  val add_fast : ?check_finite:bool -> pair -> pair -> pair
+end
+
+module Make
+    (Impl : Kimchi_pasta_snarky_backend.Snark_intf)
+    (G : Intf.Group(Impl).S with type t = Impl.Field.t * Impl.Field.t) : sig
+  type pair := Impl.Field.t Tuple_lib.Double.t
+
+  val seal : pair -> pair
+
+  val add_fast : ?check_finite:bool -> pair -> pair -> pair
 
   val bits_per_chunk : int
 
@@ -41,28 +40,51 @@ module Make
     -> num_bits:int
     -> G.t
 
+  (** Interface for the scalar field of the curve *)
   module type Scalar_field_intf = sig
     module Constant : sig
+      (** Represents an element of the field *)
       type t
 
+      (** The number of bits in the field's order, i.e.
+          [1 + log2(field_order)] *)
       val size_in_bits : int
 
+      (** The identity element for the addition *)
       val zero : t
 
+      (** The identity element for the multiplication *)
       val one : t
 
+      (** [of_int x] builds an element of type [t]. [x] is supposed to be the
+          canonical representation of the field element.
+      *)
       val of_int : int -> t
 
+      (** [a * b] returns the unique value [c] such that [a * b = c mod p] where
+          [p] is the order of the field *)
       val ( * ) : t -> t -> t
 
+      (** [a / b] returns the unique value [c] such that [a * c = b mod p] where
+          [p] is the order of the field
+      *)
       val ( / ) : t -> t -> t
 
+      (** [a + b] returns the unique value [c] such that [a + b = c mod p] where
+          [p] is the order of the field *)
       val ( + ) : t -> t -> t
 
+      (** [a - b] returns the unique value [c] such that [a + c = b mod p] where
+          [p] is the order of the field *)
       val ( - ) : t -> t -> t
 
+      (** [inv x] returns the unique value [y] such that [x * y = one mod p]
+          where [p] is the order of the field.
+      *)
       val inv : t -> t
 
+      (** [negate x] returns the unique value [y] such that [x + y = zero mod p]
+          where [p] is the order of the field *)
       val negate : t -> t
 
       val to_bigint : t -> Impl.Bigint.t

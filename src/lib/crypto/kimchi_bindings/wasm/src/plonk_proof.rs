@@ -1,32 +1,39 @@
 // use kimchi::circuits::expr::{Linearization, PolishToken, Variable, Column};
 // use kimchi::circuits::gate::{GateType, CurrOrNext};
 use crate::wasm_flat_vector::WasmFlatVector;
+use crate::wasm_vector::fp::WasmVecVecFp;
+use crate::wasm_vector::fq::WasmVecVecFq;
 use crate::wasm_vector::WasmVector;
 use paste::paste;
 use std::convert::TryInto;
 use wasm_bindgen::prelude::*;
 // use std::sync::Arc;
-// use commitment_dlog::srs::SRS;
+// use poly_commitment::srs::SRS;
+use kimchi::circuits::lookup::runtime_tables::RuntimeTable;
 // use kimchi::index::{expr_linearization, VerifierIndex as DlogVerifierIndex};
 // use ark_poly::{EvaluationDomain, Radix2EvaluationDomain as Domain};
-use ark_ec::AffineCurve;
+use ark_ec::AffineRepr;
 use ark_ff::One;
 use array_init::array_init;
 use kimchi::circuits::wires::COLUMNS;
+use kimchi::verifier::Context;
+use std::array;
 // use std::path::Path;
-use commitment_dlog::{
-    commitment::{CommitmentCurve, PolyComm},
-    evaluation_proof::OpeningProof,
-};
 use groupmap::GroupMap;
 use kimchi::proof::{
-    PointEvaluations, ProofEvaluations, ProverCommitments, ProverProof, RecursionChallenge,
+    LookupCommitments, PointEvaluations, ProofEvaluations, ProverCommitments, ProverProof,
+    RecursionChallenge,
 };
 use kimchi::prover_index::ProverIndex;
 use kimchi::verifier::batch_verify;
 use mina_poseidon::{
     constants::PlonkSpongeConstantsKimchi,
     sponge::{DefaultFqSponge, DefaultFrSponge},
+};
+use poly_commitment::{
+    commitment::{CommitmentCurve, PolyComm},
+    ipa::OpeningProof,
+    SRS as _
 };
 use serde::{Deserialize, Serialize};
 
@@ -52,34 +59,8 @@ macro_rules! impl_proof {
      $WasmVerifierIndex: ty,
      $field_name: ident
      ) => {
-
         paste! {
-            #[wasm_bindgen]
-            pub struct [<WasmVecVec $field_name:camel>](Vec<Vec<$F>>);
             type WasmVecVecF = [<WasmVecVec $field_name:camel>];
-
-            #[wasm_bindgen]
-            impl [<WasmVecVec $field_name:camel>] {
-                #[wasm_bindgen(constructor)]
-                pub fn create(n: i32) -> Self {
-                    [<WasmVecVec $field_name:camel>](Vec::with_capacity(n as usize))
-                }
-
-                #[wasm_bindgen]
-                pub fn push(&mut self, x: WasmFlatVector<$WasmF>) {
-                    self.0.push(x.into_iter().map(Into::into).collect())
-                }
-
-                #[wasm_bindgen]
-                pub fn get(&self, i: i32) -> WasmFlatVector<$WasmF> {
-                    self.0[i as usize].clone().into_iter().map(Into::into).collect()
-                }
-
-                #[wasm_bindgen]
-                pub fn set(&mut self, i: i32, x: WasmFlatVector<$WasmF>) {
-                    self.0[i as usize] = x.into_iter().map(Into::into).collect()
-                }
-            }
 
             #[derive(Clone)]
             pub struct [<Wasm $field_name:camel ProofEvaluations>](
@@ -143,6 +124,102 @@ macro_rules! impl_proof {
 
             #[wasm_bindgen]
             #[derive(Clone)]
+            pub struct [<Wasm $field_name:camel LookupCommitments>]
+            {
+                #[wasm_bindgen(skip)]
+                pub sorted: WasmVector<$WasmPolyComm>,
+                #[wasm_bindgen(skip)]
+                pub aggreg: $WasmPolyComm,
+                #[wasm_bindgen(skip)]
+                pub runtime: Option<$WasmPolyComm>,
+            }
+
+            type WasmLookupCommitments = [<Wasm $field_name:camel LookupCommitments>];
+
+            #[wasm_bindgen]
+            impl [<Wasm $field_name:camel LookupCommitments>] {
+                #[wasm_bindgen(constructor)]
+                pub fn new(
+                    sorted: WasmVector<$WasmPolyComm>,
+                    aggreg: $WasmPolyComm,
+                    runtime: Option<$WasmPolyComm>) -> Self {
+                    WasmLookupCommitments { sorted, aggreg, runtime }
+                }
+
+                #[wasm_bindgen(getter)]
+                pub fn sorted(&self) -> WasmVector<$WasmPolyComm> {
+                    self.sorted.clone()
+                }
+
+                #[wasm_bindgen(getter)]
+                pub fn aggreg(&self) -> $WasmPolyComm {
+                    self.aggreg.clone()
+                }
+
+                #[wasm_bindgen(getter)]
+                pub fn runtime(&self) -> Option<$WasmPolyComm> {
+                    self.runtime.clone()
+                }
+
+                #[wasm_bindgen(setter)]
+                pub fn set_sorted(&mut self, s: WasmVector<$WasmPolyComm>) {
+                    self.sorted = s
+                }
+
+                #[wasm_bindgen(setter)]
+                pub fn set_aggreg(&mut self, a: $WasmPolyComm) {
+                    self.aggreg = a
+                }
+
+                #[wasm_bindgen(setter)]
+                pub fn set_runtime(&mut self, r: Option<$WasmPolyComm>) {
+                    self.runtime = r
+                }
+            }
+
+
+            impl From<&LookupCommitments<$G>> for WasmLookupCommitments {
+                fn from(x: &LookupCommitments<$G>) -> Self {
+                    WasmLookupCommitments {
+                        sorted: x.sorted.iter().map(Into::into).collect(),
+                        aggreg: x.aggreg.clone().into(),
+                        runtime: x.runtime.clone().map(Into::into)
+                    }
+                }
+            }
+
+            impl From<LookupCommitments<$G>> for WasmLookupCommitments {
+                fn from(x: LookupCommitments<$G>) -> Self {
+                    WasmLookupCommitments {
+                        sorted: x.sorted.into_iter().map(Into::into).collect(),
+                        aggreg: x.aggreg.into(),
+                        runtime: x.runtime.map(Into::into)
+                    }
+                }
+            }
+
+            impl From<&WasmLookupCommitments> for LookupCommitments<$G> {
+                fn from(x: &WasmLookupCommitments) -> Self {
+                    LookupCommitments {
+                        sorted: x.sorted.iter().map(Into::into).collect(),
+                        aggreg: x.aggreg.clone().into(),
+                        runtime: x.runtime.clone().map(Into::into)
+                    }
+                }
+            }
+
+            impl From<WasmLookupCommitments> for LookupCommitments<$G> {
+                fn from(x: WasmLookupCommitments) -> Self {
+                    LookupCommitments {
+                        sorted: x.sorted.into_iter().map(Into::into).collect(),
+                        aggreg: x.aggreg.into(),
+                        runtime: x.runtime.map(Into::into)
+                    }
+                }
+            }
+
+            #[wasm_bindgen]
+            #[derive(Clone)]
             pub struct [<Wasm $field_name:camel ProverCommitments>]
             {
                 #[wasm_bindgen(skip)]
@@ -151,10 +228,8 @@ macro_rules! impl_proof {
                 pub z_comm: $WasmPolyComm,
                 #[wasm_bindgen(skip)]
                 pub t_comm: $WasmPolyComm,
-                /* TODO
                 #[wasm_bindgen(skip)]
-                pub lookup: Option<LookupCommitments<G>>,
-                */
+                pub lookup: Option<WasmLookupCommitments>,
             }
             type WasmProverCommitments = [<Wasm $field_name:camel ProverCommitments>];
 
@@ -164,8 +239,10 @@ macro_rules! impl_proof {
                 pub fn new(
                     w_comm: WasmVector<$WasmPolyComm>,
                     z_comm: $WasmPolyComm,
-                    t_comm: $WasmPolyComm) -> Self {
-                    WasmProverCommitments { w_comm, z_comm, t_comm }
+                    t_comm: $WasmPolyComm,
+                    lookup: Option<WasmLookupCommitments>
+                ) -> Self {
+                    WasmProverCommitments { w_comm, z_comm, t_comm, lookup }
                 }
 
                 #[wasm_bindgen(getter)]
@@ -181,6 +258,11 @@ macro_rules! impl_proof {
                     self.t_comm.clone()
                 }
 
+                #[wasm_bindgen(getter)]
+                pub fn lookup(&self) -> Option<WasmLookupCommitments> {
+                    self.lookup.clone()
+                }
+
                 #[wasm_bindgen(setter)]
                 pub fn set_w_comm(&mut self, x: WasmVector<$WasmPolyComm>) {
                     self.w_comm = x
@@ -193,6 +275,11 @@ macro_rules! impl_proof {
                 pub fn set_t_comm(&mut self, x: $WasmPolyComm) {
                     self.t_comm = x
                 }
+
+                #[wasm_bindgen(setter)]
+                pub fn set_lookup(&mut self, l: Option<WasmLookupCommitments>) {
+                    self.lookup = l
+                }
             }
 
             impl From<&ProverCommitments<$G>> for WasmProverCommitments {
@@ -201,6 +288,7 @@ macro_rules! impl_proof {
                         w_comm: x.w_comm.iter().map(Into::into).collect(),
                         z_comm: x.z_comm.clone().into(),
                         t_comm: x.t_comm.clone().into(),
+                        lookup: x.lookup.clone().map(Into::into)
                     }
                 }
             }
@@ -211,6 +299,7 @@ macro_rules! impl_proof {
                         w_comm: x.w_comm.iter().map(Into::into).collect(),
                         z_comm: x.z_comm.into(),
                         t_comm: x.t_comm.into(),
+                        lookup: x.lookup.map(Into::into),
                     }
                 }
             }
@@ -221,8 +310,7 @@ macro_rules! impl_proof {
                         w_comm: array_init(|i| x.w_comm[i].clone().into()),
                         z_comm: x.z_comm.clone().into(),
                         t_comm: x.t_comm.clone().into(),
-                        // TODO
-                        lookup: None,
+                        lookup: x.lookup.clone().map(Into::into),
                     }
                 }
             }
@@ -233,8 +321,7 @@ macro_rules! impl_proof {
                         w_comm: array_init(|i| (&x.w_comm[i]).into()),
                         z_comm: x.z_comm.into(),
                         t_comm: x.t_comm.into(),
-                        // TODO
-                        lookup: None,
+                        lookup: x.lookup.map(Into::into),
                     }
                 }
             }
@@ -375,8 +462,8 @@ macro_rules! impl_proof {
             }
             type WasmProverProof = [<Wasm $field_name:camel ProverProof>];
 
-            impl From<&ProverProof<$G>> for WasmProverProof {
-                fn from(x: &ProverProof<$G>) -> Self {
+            impl From<(&ProverProof<$G, OpeningProof<$G>>, &Vec<$F>)> for WasmProverProof {
+                fn from((x, public): (&ProverProof<$G, OpeningProof<$G>>, &Vec<$F>)) -> Self {
                     let (scalars, comms) =
                         x.prev_challenges
                             .iter()
@@ -389,16 +476,16 @@ macro_rules! impl_proof {
                         proof: x.proof.clone().into(),
                         evals: x.evals.clone().into(),
                         ft_eval1: x.ft_eval1.clone().into(),
-                        public: x.public.clone().into_iter().map(Into::into).collect(),
+                        public: public.clone().into_iter().map(Into::into).collect(),
                         prev_challenges_scalars: scalars,
                         prev_challenges_comms: comms,
                     }
                 }
             }
 
-            impl From<ProverProof<$G>> for WasmProverProof {
-                fn from(x: ProverProof<$G>) -> Self {
-                    let ProverProof {ft_eval1, commitments, proof, evals , public, prev_challenges} = x;
+            impl From<(ProverProof<$G, OpeningProof<$G>>, Vec<$F>)> for WasmProverProof {
+                fn from((x, public): (ProverProof<$G, OpeningProof<$G>>, Vec<$F>)) -> Self {
+                    let ProverProof {ft_eval1, commitments, proof, evals , prev_challenges} = x;
                     let (scalars, comms) =
                         prev_challenges
                             .into_iter()
@@ -416,13 +503,12 @@ macro_rules! impl_proof {
                 }
             }
 
-            impl From<&WasmProverProof> for ProverProof<$G> {
+            impl From<&WasmProverProof> for (ProverProof<$G, OpeningProof<$G>>, Vec<$F>) {
                 fn from(x: &WasmProverProof) -> Self {
-                    ProverProof {
+                    let proof = ProverProof {
                         commitments: x.commitments.clone().into(),
                         proof: x.proof.clone().into(),
                         evals: x.evals.clone().into(),
-                        public: x.public.clone().into_iter().map(Into::into).collect(),
                         prev_challenges:
                             (&x.prev_challenges_scalars)
                                 .into_iter()
@@ -435,17 +521,18 @@ macro_rules! impl_proof {
                                 })
                                 .collect(),
                         ft_eval1: x.ft_eval1.clone().into()
-                    }
+                    };
+                    let public = x.public.clone().into_iter().map(Into::into).collect();
+                    (proof, public)
                 }
             }
 
-            impl From<WasmProverProof> for ProverProof<$G> {
+            impl From<WasmProverProof> for (ProverProof<$G, OpeningProof<$G>>, Vec<$F>) {
                 fn from(x: WasmProverProof) -> Self {
-                    ProverProof {
+                    let proof =ProverProof {
                         commitments: x.commitments.into(),
                         proof: x.proof.into(),
                         evals: x.evals.into(),
-                        public: x.public.into_iter().map(Into::into).collect(),
                         prev_challenges:
                             (x.prev_challenges_scalars)
                                 .into_iter()
@@ -458,7 +545,9 @@ macro_rules! impl_proof {
                                 })
                                 .collect(),
                         ft_eval1: x.ft_eval1.into()
-                    }
+                    };
+                    let public = x.public.into_iter().map(Into::into).collect();
+                    (proof, public)
                 }
             }
 
@@ -536,9 +625,33 @@ macro_rules! impl_proof {
 
                 #[wasm_bindgen]
                 pub fn serialize(&self) -> String {
-                    let proof = ProverProof::from(self);
+                    let (proof, _public_input) = self.into();
                     let serialized = rmp_serde::to_vec(&proof).unwrap();
                     base64::encode(serialized)
+                }
+            }
+
+            #[wasm_bindgen]
+            pub struct [<Wasm $field_name:camel RuntimeTable>] {
+                id: i32,
+                data: WasmFlatVector<$WasmF>
+            }
+            type WasmRuntimeTable = [<Wasm $field_name:camel RuntimeTable>];
+
+            #[wasm_bindgen]
+            impl [<Wasm $field_name:camel RuntimeTable>] {
+                #[wasm_bindgen(constructor)]
+                pub fn new(id: i32, data: WasmFlatVector<$WasmF>) -> WasmRuntimeTable {
+                    WasmRuntimeTable {id, data}
+                }
+            }
+
+            impl From<[<Wasm $field_name:camel RuntimeTable>]> for RuntimeTable<$F> {
+                fn from(wasm_rt: WasmRuntimeTable) -> RuntimeTable<$F> {
+                    RuntimeTable {
+                        id: wasm_rt.id.into(),
+                        data: wasm_rt.data.into_iter().map(Into::into).collect()
+                    }
                 }
             }
 
@@ -546,75 +659,61 @@ macro_rules! impl_proof {
             pub fn [<$name:snake _create>](
                 index: &$WasmIndex,
                 witness: WasmVecVecF,
+                wasm_runtime_tables: WasmVector<WasmRuntimeTable>,
                 prev_challenges: WasmFlatVector<$WasmF>,
                 prev_sgs: WasmVector<$WasmG>,
-            ) -> WasmProverProof {
+            ) -> Result<WasmProverProof, JsError> {
                 console_error_panic_hook::set_once();
-                {
-                    let ptr: &mut commitment_dlog::srs::SRS<$G> =
-                        unsafe { &mut *(std::sync::Arc::as_ptr(&index.0.as_ref().srs) as *mut _) };
-                    ptr.add_lagrange_basis(index.0.as_ref().cs.domain.d1);
-                }
-                let prev: Vec<RecursionChallenge<$G>> = {
-                    if prev_challenges.is_empty() {
-                        Vec::new()
-                    } else {
-                        let challenges_per_sg = prev_challenges.len() / prev_sgs.len();
-                        prev_sgs
-                            .into_iter()
-                            .map(Into::<$G>::into)
-                            .enumerate()
-                            .map(|(i, sg)| {
-                                let chals =
-                                    prev_challenges[(i * challenges_per_sg)..(i + 1) * challenges_per_sg]
-                                        .iter()
-                                        .map(|a| a.clone().into())
-                                        .collect();
-                                let comm = PolyComm::<$G> {
-                                    unshifted: vec![sg],
-                                    shifted: None,
-                                };
-                                RecursionChallenge { chals, comm }
-                            })
-                            .collect()
-                    }
-                };
+                let (maybe_proof, public_input) = crate::rayon::run_in_pool(|| {
+                    index.0.srs.get_lagrange_basis(index.0.as_ref().cs.domain.d1);
+                    let prev: Vec<RecursionChallenge<$G>> = {
+                        if prev_challenges.is_empty() {
+                            Vec::new()
+                        } else {
+                            let challenges_per_sg = prev_challenges.len() / prev_sgs.len();
+                            prev_sgs
+                                .into_iter()
+                                .map(Into::<$G>::into)
+                                .enumerate()
+                                .map(|(i, sg)| {
+                                    let chals =
+                                        prev_challenges[(i * challenges_per_sg)..(i + 1) * challenges_per_sg]
+                                            .iter()
+                                            .map(|a| a.clone().into())
+                                            .collect();
+                                    let comm = PolyComm::<$G> {
+                                        chunks: vec![sg],
+                                    };
+                                    RecursionChallenge { chals, comm }
+                                })
+                                .collect()
+                        }
+                    };
 
-                let witness: [Vec<_>; COLUMNS] = witness.0
-                    .try_into()
-                    .expect("the witness should be a column of 15 vectors");
+                    let rust_runtime_tables: Vec<RuntimeTable<$F>> = wasm_runtime_tables.into_iter().map(Into::into).collect();
 
-                let index: &ProverIndex<$G> = &index.0.as_ref();
+                    let witness: [Vec<_>; COLUMNS] = witness.0
+                        .try_into()
+                        .expect("the witness should be a column of 15 vectors");
 
+                    let index: &ProverIndex<$G, OpeningProof<$G>> = &index.0.as_ref();
 
-                // let mut vec = index.linearization.index_terms.iter().map(|i| format!("{:?}", i)).collect::<Vec<_>>();
-                // vec.sort_by(|s, t| s.cmp(&t));
-                // console_log(&format!("{:?}", vec));
+                    let public_input = witness[0][0..index.cs.public].to_vec();
 
-                // print witness
-                // for (i, w) in witness.iter().enumerate() {
-                //     let st = w.iter().map(|f| format!("{}", f)).collect::<Vec<_>>().join("\n");
-                //     console_log(&format!("witness {}\n{}\n", i, st));
-                // }
+                    // Release the runtime lock so that other threads can run using it while we generate the proof.
+                    let group_map = GroupMap::<_>::setup();
+                    let maybe_proof = ProverProof::create_recursive::<
+                        DefaultFqSponge<_, PlonkSpongeConstantsKimchi>,
+                        DefaultFrSponge<_, PlonkSpongeConstantsKimchi>,
+                        _>(&group_map, witness, &rust_runtime_tables, index, prev, None,
+                           &mut rand::rngs::OsRng
+                    );
+                    (maybe_proof, public_input)
+                });
 
-                // verify witness
-                // this seems to throw in general
-                // console_log(&"verifying witness!");
-                // index.cs.verify(&witness).expect("incorrect witness");
-                // console_log(&"verifying witness ok");
-
-                // Release the runtime lock so that other threads can run using it while we generate the proof.
-                let group_map = GroupMap::<_>::setup();
-                let maybe_proof = ProverProof::create_recursive::<
-                    DefaultFqSponge<_, PlonkSpongeConstantsKimchi>,
-                    DefaultFrSponge<_, PlonkSpongeConstantsKimchi>,
-                >(&group_map, witness, &[], index, prev, None);
                 return match maybe_proof {
-                    Ok(proof) => proof.into(),
-                    Err(err) => {
-                        log(&err.to_string());
-                        panic!("thrown an error")
-                    }
+                    Ok(proof) => Ok((proof, public_input).into()),
+                    Err(err) => Err(JsError::from(err))
                 }
             }
 
@@ -623,15 +722,20 @@ macro_rules! impl_proof {
                 index: $WasmVerifierIndex,
                 proof: WasmProverProof,
             ) -> bool {
-                let group_map = <$G as CommitmentCurve>::Map::setup();
-                batch_verify::<
-                    $G,
-                    DefaultFqSponge<_, PlonkSpongeConstantsKimchi>,
-                    DefaultFrSponge<_, PlonkSpongeConstantsKimchi>,
-                >(
-                    &group_map,
-                    &[(&index.into(), &proof.into())]
-                ).is_ok()
+                crate::rayon::run_in_pool(|| {
+                    let group_map = <$G as CommitmentCurve>::Map::setup();
+                    let verifier_index = &index.into();
+                    let (proof, public_input) = &proof.into();
+                    batch_verify::<
+                        $G,
+                        DefaultFqSponge<_, PlonkSpongeConstantsKimchi>,
+                        DefaultFrSponge<_, PlonkSpongeConstantsKimchi>,
+                        OpeningProof<$G>
+                    >(
+                        &group_map,
+                        &[Context { verifier_index, proof, public_input }]
+                    ).is_ok()
+                })
             }
 
             #[wasm_bindgen]
@@ -655,29 +759,31 @@ macro_rules! impl_proof {
                 indexes: WasmVector<$WasmVerifierIndex>,
                 proofs: WasmVector<WasmProverProof>,
             ) -> bool {
-                let ts: Vec<_> = indexes
-                    .into_iter()
-                    .zip(proofs.into_iter())
-                    .map(|(i, p)| (i.into(), p.into()))
-                    .collect();
-                let ts: Vec<_> = ts.iter().map(|(i, p)| (i, p)).collect();
-                let group_map = GroupMap::<_>::setup();
+                crate::rayon::run_in_pool(|| {
+                    let ts: Vec<_> = indexes
+                        .into_iter()
+                        .zip(proofs.into_iter())
+                        .map(|(index, proof)| (index.into(), proof.into()))
+                        .collect();
+                    let ts: Vec<_> = ts.iter().map(|(verifier_index, (proof, public_input))| Context { verifier_index, proof, public_input}).collect();
+                    let group_map = GroupMap::<_>::setup();
 
-                batch_verify::<
-                    $G,
-                    DefaultFqSponge<_, PlonkSpongeConstantsKimchi>,
-                    DefaultFrSponge<_, PlonkSpongeConstantsKimchi>,
-                >(&group_map, &ts)
-                .is_ok()
+                    batch_verify::<
+                        $G,
+                        DefaultFqSponge<_, PlonkSpongeConstantsKimchi>,
+                        DefaultFrSponge<_, PlonkSpongeConstantsKimchi>,
+                        OpeningProof<$G>
+                    >(&group_map, &ts)
+                    .is_ok()
+                })
             }
 
             #[wasm_bindgen]
             pub fn [<$name:snake _dummy>]() -> WasmProverProof {
                 fn comm() -> PolyComm<$G> {
-                    let g = $G::prime_subgroup_generator();
+                    let g = $G::generator();
                     PolyComm {
-                        shifted: Some(g),
-                        unshifted: vec![g, g, g],
+                        chunks: vec![g, g, g],
                     }
                 }
 
@@ -687,7 +793,7 @@ macro_rules! impl_proof {
                 };
                 let prev_challenges = vec![prev.clone(), prev.clone(), prev.clone()];
 
-                let g = $G::prime_subgroup_generator();
+                let g = $G::generator();
                 let proof = OpeningProof {
                     lr: vec![(g, g), (g, g), (g, g)],
                     z1: $F::one(),
@@ -704,9 +810,28 @@ macro_rules! impl_proof {
                     coefficients: array_init(|_| eval()),
                     z: eval(),
                     s: array_init(|_| eval()),
-                    lookup: None,
                     generic_selector: eval(),
                     poseidon_selector: eval(),
+                    complete_add_selector: eval(),
+                    mul_selector: eval(),
+                    emul_selector: eval(),
+                    endomul_scalar_selector: eval(),
+                    range_check0_selector: None,
+                    range_check1_selector: None,
+                    foreign_field_add_selector: None,
+                    foreign_field_mul_selector: None,
+                    xor_selector: None,
+                    rot_selector: None,
+                    lookup_aggregation: None,
+                    lookup_table: None,
+                    lookup_sorted: array::from_fn(|_| None),
+                    runtime_lookup_table: None,
+                    runtime_lookup_table_selector: None,
+                    xor_lookup_selector: None,
+                    lookup_gate_lookup_selector: None,
+                    range_check_lookup_selector: None,
+                    foreign_field_mul_lookup_selector: None,
+                    public: None,
                 };
 
                 let dlogproof = ProverProof {
@@ -719,11 +844,11 @@ macro_rules! impl_proof {
                     proof,
                     evals,
                     ft_eval1: $F::one(),
-                    public: vec![$F::one(), $F::one()],
                     prev_challenges,
                 };
 
-                dlogproof.into()
+                let public = vec![$F::one(), $F::one()];
+                (dlogproof, public).into()
             }
 
             #[wasm_bindgen]

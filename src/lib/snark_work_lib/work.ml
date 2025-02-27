@@ -23,7 +23,13 @@ module Single = struct
           ('witness, 'ledger_proof) Stable.Latest.t =
       | Transition of Transaction_snark.Statement.t * 'witness
       | Merge of Transaction_snark.Statement.t * 'ledger_proof * 'ledger_proof
-    [@@deriving sexp, to_yojson]
+    [@@deriving sexp, yojson]
+
+    let map ~f_witness ~f_proof = function
+      | Transition (s, w) ->
+          Transition (s, f_witness w)
+      | Merge (s, p1, p2) ->
+          Merge (s, f_proof p1, f_proof p2)
 
     let witness (t : (_, _) t) =
       match t with Transition (_, witness) -> Some witness | Merge _ -> None
@@ -80,7 +86,7 @@ module Spec = struct
 
   type 'single t = 'single Stable.Latest.t =
     { instances : 'single One_or_two.t; fee : Currency.Fee.t }
-  [@@deriving fields, sexp, to_yojson]
+  [@@deriving fields, sexp, yojson]
 end
 
 module Result = struct
@@ -98,4 +104,14 @@ module Result = struct
       [@@deriving fields]
     end
   end]
+end
+
+module Result_without_metrics = struct
+  type 'proof t =
+    { proofs : 'proof One_or_two.t
+    ; statements : Transaction_snark.Statement.t One_or_two.t
+    ; prover : Signature_lib.Public_key.Compressed.t
+    ; fee : Currency.Fee.t
+    }
+  [@@deriving yojson, sexp]
 end

@@ -25,11 +25,6 @@ let pop_exn : t -> (Account_update.t * t) * t = function
   | _ ->
       failwith "pop_exn"
 
-let push ~account_update ~calls t =
-  Zkapp_command.Call_forest.cons ~calls account_update t
-
-let hash (t : t) = Zkapp_command.Call_forest.hash t
-
 open Snark_params.Tick.Run
 
 module Checked = struct
@@ -147,6 +142,70 @@ module Checked = struct
             } )
           : (account_update * t) * t ) )
 
+  let pop ~dummy ~dummy_tree_hash ({ hash = h; data = r } : t) :
+      (account_update * t) * t =
+    with_label "Zkapp_call_forest.pop" (fun () ->
+        let hd_r =
+          V.create (fun () ->
+              match V.get r with
+              | hd :: _ ->
+                  With_stack_hash.elt hd
+              | [] ->
+                  dummy )
+        in
+        let account_update = V.create (fun () -> (V.get hd_r).account_update) in
+        let auth =
+          V.(create (fun () -> (V.get account_update).authorization))
+        in
+        let account_update =
+          exists (Account_update.Body.typ ()) ~compute:(fun () ->
+              (V.get account_update).body )
+        in
+        let account_update =
+          With_hash.of_data account_update
+            ~hash_data:Zkapp_command.Digest.Account_update.Checked.create
+        in
+        let subforest : t =
+          let subforest = V.create (fun () -> (V.get hd_r).calls) in
+          let subforest_hash =
+            exists Zkapp_command.Digest.Forest.typ ~compute:(fun () ->
+                Zkapp_command.Call_forest.hash (V.get subforest) )
+          in
+          { hash = subforest_hash; data = subforest }
+        in
+        let tl_hash =
+          exists Zkapp_command.Digest.Forest.typ ~compute:(fun () ->
+              match V.get r with
+              | _ :: tl ->
+                  Zkapp_command.Call_forest.hash tl
+              | [] ->
+                  Zkapp_command.Digest.Forest.empty )
+        in
+        let tree_hash =
+          Zkapp_command.Digest.Tree.Checked.create
+            ~account_update:account_update.hash ~calls:subforest.hash
+        in
+        let hash_cons =
+          Zkapp_command.Digest.Forest.Checked.cons tree_hash tl_hash
+        in
+        let () =
+          let correct = F.equal hash_cons h in
+          let empty = F.equal F.empty h in
+          let is_dummy =
+            Zkapp_command.Digest.Tree.Checked.equal tree_hash dummy_tree_hash
+          in
+          Boolean.(Assert.any [ correct; empty &&& is_dummy ])
+        in
+        ( ( ({ account_update; control = auth }, subforest)
+          , { hash = tl_hash
+            ; data =
+                V.(
+                  create (fun () ->
+                      match get r with _ :: tl -> tl | [] -> [] ))
+            } )
+          : (account_update * t) * t ) )
+
+  (* TODO Consider moving out of mina_base *)
   let push
       ~account_update:
         { account_update = { hash = account_update_hash; data = account_update }

@@ -1,7 +1,5 @@
 (* user_command_intf.ml *)
 
-[%%import "/src/config.mlh"]
-
 open Mina_base_import
 open Core_kernel
 open Snark_params.Tick
@@ -13,8 +11,8 @@ module type Gen_intf = sig
   module Gen : sig
     (** Generate a single transaction between
      * Generate random keys for sender and receiver
-     * for fee $\in [Mina_compile_config.minimum_user_command_fee,
-     * Mina_compile_config.minimum_user_command_fee+fee_range]$
+     * for fee $\in [Currency.Fee.minimum_user_command_fee,
+     * Currency.Fee.minimum_user_command_fee+fee_range]$
      * and an amount $\in [1,max_amount]$
     *)
     val payment :
@@ -24,14 +22,15 @@ module type Gen_intf = sig
       -> ?nonce:Account_nonce.t
       -> ?min_amount:int
       -> max_amount:int
+      -> ?min_fee:Currency.Fee.t
       -> fee_range:int
       -> unit
       -> t Quickcheck.Generator.t
 
     (** Generate a single transaction between
      * $a, b \in keys$
-     * for fee $\in [Mina_compile_config.minimum_user_command_fee,
-     * Mina_compile_config.minimum_user_command_fee+fee_range]$
+     * for fee $\in [Currency.Fee.minimum_user_command_fee,
+     * Currency.Fee.minimum_user_command_fee+fee_range]$
      * and an amount $\in [1,max_amount]$
     *)
     val payment_with_random_participants :
@@ -40,6 +39,7 @@ module type Gen_intf = sig
       -> ?nonce:Account_nonce.t
       -> ?min_amount:int
       -> max_amount:int
+      -> ?min_fee:Currency.Fee.t
       -> fee_range:int
       -> unit
       -> t Quickcheck.Generator.t
@@ -48,6 +48,7 @@ module type Gen_intf = sig
          key_gen:
            (Signature_keypair.t * Signature_keypair.t) Quickcheck.Generator.t
       -> ?nonce:Account_nonce.t
+      -> ?min_fee:Currency.Fee.t
       -> fee_range:int
       -> unit
       -> t Quickcheck.Generator.t
@@ -55,6 +56,7 @@ module type Gen_intf = sig
     val stake_delegation_with_random_participants :
          keys:Signature_keypair.t array
       -> ?nonce:Account_nonce.t
+      -> ?min_fee:Currency.Fee.t
       -> fee_range:int
       -> unit
       -> t Quickcheck.Generator.t
@@ -84,6 +86,8 @@ module type S = sig
 
   include Hashable.S with type t := t
 
+  val signature : t -> Signature.t
+
   val payload : t -> Signed_command_payload.t
 
   val fee : t -> Currency.Fee.t
@@ -102,10 +106,6 @@ module type S = sig
 
   val token : t -> Token_id.t
 
-  val source_pk : t -> Public_key.Compressed.t
-
-  val source : t -> Account_id.t
-
   val receiver_pk : t -> Public_key.Compressed.t
 
   val receiver : t -> Account_id.t
@@ -116,12 +116,7 @@ module type S = sig
 
   val memo : t -> Signed_command_memo.t
 
-  val valid_until : t -> Global_slot.t
-
-  (* for filtering *)
-  val minimum_fee : Currency.Fee.t
-
-  val has_insufficient_fee : t -> bool
+  val valid_until : t -> Global_slot_since_genesis.t
 
   val tag : t -> Transaction_union_tag.t
 
@@ -174,8 +169,6 @@ module type S = sig
 
   val check_valid_keys : t -> bool
 
-  module Base58_check_v1 : Codable.Base58_check_intf with type t := t_v1
-
   module For_tests : sig
     (** the signature kind is an argument, to match `sign`, but ignored *)
     val fake_sign :
@@ -211,6 +204,8 @@ module type S = sig
 
   val of_base58_check_exn_v1 : string -> t_v1 Or_error.t
 
+  val to_base58_check_v1 : t_v1 -> string
+
   include Codable.Base64_intf with type t := t
 end
 
@@ -234,15 +229,19 @@ module type Full = sig
 
   [%%versioned:
   module Stable : sig
-    [@@@no_toplevel_latest_type]
+    [@@@with_top_version_tag]
 
     module V2 : sig
       type t =
-        ( Payload.Stable.V2.t
-        , Public_key.Stable.V1.t
-        , Signature.Stable.V1.t )
+        ( Payload.Stable.Latest.t
+        , Public_key.Stable.Latest.t
+        , Signature.Stable.Latest.t )
         Poly.Stable.V1.t
-      [@@deriving sexp, hash, yojson, version]
+      [@@deriving sexp, hash, version]
+
+      val to_yojson : t -> Yojson.Safe.t
+
+      val of_yojson : Yojson.Safe.t -> (t, string) result
 
       include Comparable.S with type t := t
 
@@ -263,8 +262,10 @@ module type Full = sig
         , Signature.Stable.V1.t )
         Poly.Stable.V1.t
       [@@deriving compare, sexp, hash, yojson]
+
+      val to_latest : t -> Latest.t
     end
   end]
 
-  include S with type t = Stable.V2.t and type t_v1 = Stable.V1.t
+  include S with type t = Stable.V2.t and type t_v1 := Stable.V1.t
 end

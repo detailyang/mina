@@ -47,7 +47,7 @@ let validate_inputs ~logger inputs (test_config : Test_config.t) :
   else Deferred.return ()
 
 let engines : engine list =
-  [ ("cloud", (module Integration_test_cloud_engine : Intf.Engine.S)) ]
+  [ ("local", (module Integration_test_local_engine : Intf.Engine.S)) ]
 
 let tests : test list =
   [ ( "peers-reliability"
@@ -55,14 +55,19 @@ let tests : test list =
   ; ( "chain-reliability"
     , (module Chain_reliability_test.Make : Intf.Test.Functor_intf) )
   ; ("payments", (module Payments_test.Make : Intf.Test.Functor_intf))
-  ; ("delegation", (module Delegation_test.Make : Intf.Test.Functor_intf))
   ; ("gossip-consis", (module Gossip_consistency.Make : Intf.Test.Functor_intf))
   ; ("medium-bootstrap", (module Medium_bootstrap.Make : Intf.Test.Functor_intf))
   ; ("zkapps", (module Zkapps.Make : Intf.Test.Functor_intf))
   ; ("zkapps-timing", (module Zkapps_timing.Make : Intf.Test.Functor_intf))
-  ; ( "opt-block-prod"
+  ; ("zkapps-nonce", (module Zkapps_nonce_test.Make : Intf.Test.Functor_intf))
+  ; ( "verification-key"
+    , (module Verification_key_update.Make : Intf.Test.Functor_intf) )
+  ; ( "block-prod-prio"
     , (module Block_production_priority.Make : Intf.Test.Functor_intf) )
-  ; ("snarkyjs", (module Snarkyjs.Make : Intf.Test.Functor_intf))
+  ; ("block-reward", (module Block_reward_test.Make : Intf.Test.Functor_intf))
+  ; ("hard-fork", (module Hard_fork.Make : Intf.Test.Functor_intf))
+  ; ("epoch-ledger", (module Epoch_ledger.Make : Intf.Test.Functor_intf))
+  ; ("slot-end", (module Slot_end_test.Make : Intf.Test.Functor_intf))
   ]
 
 let report_test_errors ~log_error_set ~internal_error_set =
@@ -260,6 +265,25 @@ let main inputs =
    *   Exec.execute ~logger ~engine_cli_inputs ~images (module Test (Engine))
    *)
   let logger = Logger.create () in
+  let constants : Test_config.constants =
+    let protocol =
+      { Genesis_constants.Compiled.genesis_constants.protocol with
+        k = 20
+      ; delta = 0
+      ; slots_per_epoch = 3 * 8 * 20
+      ; slots_per_sub_window = 2
+      ; grace_period_slots = 140
+      }
+    in
+    { genesis_constants =
+        { Genesis_constants.Compiled.genesis_constants with
+          protocol
+        ; txpool_max_size = 3000
+        }
+    ; constraint_constants = Genesis_constants.Compiled.constraint_constants
+    ; compile_config = Mina_compile_config.Compiled.t
+    }
+  in
   let images =
     { Test_config.Container_images.mina = inputs.mina_image
     ; archive_node =
@@ -269,11 +293,12 @@ let main inputs =
     ; points = "codaprotocol/coda-points-hack:32b.4"
     }
   in
-  let%bind () = validate_inputs ~logger inputs T.config in
+  let test_config = T.config ~constants in
+  let%bind () = validate_inputs ~logger inputs test_config in
   [%log trace] "expanding network config" ;
   let network_config =
     Engine.Network_config.expand ~logger ~test_name ~cli_inputs
-      ~debug:inputs.debug ~test_config:T.config ~images
+      ~debug:inputs.debug ~constants ~images ~test_config
   in
   (* resources which require additional cleanup at end of test *)
   let net_manager_ref : Engine.Network_manager.t option ref = ref None in
@@ -360,13 +385,32 @@ let main inputs =
         [%log info] "Starting the daemons within the pods" ;
         let start_print (node : Engine.Network.Node.t) =
           let open Malleable_error.Let_syntax in
-          [%log info] "starting %s ..." (Engine.Network.Node.id node) ;
+          [%log info] "starting %s ..." (Engine.Network.Node.infra_id node) ;
           let%bind res = Engine.Network.Node.start ~fresh_state:false node in
-          [%log info] "%s started" (Engine.Network.Node.id node) ;
+          [%log info] "%s started" (Engine.Network.Node.infra_id node) ;
           Malleable_error.return res
         in
-        let seed_nodes = network |> Engine.Network.seeds in
-        let non_seed_pods = network |> Engine.Network.all_non_seed_pods in
+        let seed_nodes =
+          network |> Engine.Network.seeds |> Core.String.Map.data
+        in
+        let non_seed_pods =
+          network |> Engine.Network.all_non_seed_nodes |> Core.String.Map.data
+        in
+        let _offline_node_event_subscription =
+          (* Monitor for offline nodes; abort the test if a node goes down
+             unexpectedly.
+          *)
+          Dsl.Event_router.on (Dsl.event_router dsl) Node_offline
+            ~f:(fun offline_node () ->
+              let node_name = Engine.Network.Node.infra_id offline_node in
+              [%log info] "Detected node offline $node"
+                ~metadata:[ ("node", `String node_name) ] ;
+              if Engine.Network.Node.should_be_running offline_node then (
+                [%log fatal] "Offline $node is required for this test"
+                  ~metadata:[ ("node", `String node_name) ] ;
+                failwith "Aborted because of required offline node" ) ;
+              Async_kernel.Deferred.return `Continue )
+        in
         (* TODO: parallelize (requires accumlative hard errors) *)
         let%bind () = Malleable_error.List.iter seed_nodes ~f:start_print in
         let%bind () =
@@ -431,7 +475,7 @@ let help_term = Term.(ret @@ const (`Help (`Plain, None)))
 
 let engine_cmd ((engine_name, (module Engine)) : engine) =
   let info =
-    let doc = "Run mina integration test(s) on remote cloud provider." in
+    let doc = "Run mina integration test(s) on engine." in
     Term.info engine_name ~doc ~exits:Term.default_exits
   in
   let test_inputs_with_cli_inputs_arg =

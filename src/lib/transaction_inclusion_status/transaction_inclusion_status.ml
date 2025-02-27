@@ -1,4 +1,3 @@
-open Inline_test_quiet_logs
 open Core_kernel
 open Mina_base
 open Mina_transaction
@@ -73,6 +72,20 @@ let%test_module "transaction_status" =
 
     let logger = Logger.null ()
 
+    let () =
+      (* Disable log messages from best_tip_diff logger. *)
+      Logger.Consumer_registry.register ~commit_id:""
+        ~id:Logger.Logger_id.best_tip_diff ~processor:(Logger.Processor.raw ())
+        ~transport:
+          (Logger.Transport.create
+             ( module struct
+               type t = unit
+
+               let transport () _ = ()
+             end )
+             () )
+        ()
+
     let time_controller = Block_time.Controller.basic ~logger
 
     let precomputed_values = Lazy.force Precomputed_values.for_unit_tests
@@ -87,11 +100,13 @@ let%test_module "transaction_status" =
 
     let pool_max_size = precomputed_values.genesis_constants.txpool_max_size
 
+    let block_window_duration =
+      Mina_compile_config.For_unit_tests.t.block_window_duration
+
     let verifier =
       Async.Thread_safe.block_on_async_exn (fun () ->
-          Verifier.create ~logger ~proof_level ~constraint_constants
-            ~conf_dir:None
-            ~pids:(Child_processes.Termination.create_pid_table ()) )
+          Verifier.For_tests.default ~constraint_constants ~logger ~proof_level
+            () )
 
     let key_gen =
       let open Quickcheck.Generator in
@@ -115,6 +130,8 @@ let%test_module "transaction_status" =
       let config =
         Transaction_pool.Resource_pool.make_config ~trust_system ~pool_max_size
           ~verifier ~genesis_constants:precomputed_values.genesis_constants
+          ~slot_tx_end:None
+          ~vk_cache_db:(Zkapp_vk_cache_tag.For_tests.create_db ())
       in
       let transaction_pool, _, local_sink =
         Transaction_pool.create ~config
@@ -122,10 +139,11 @@ let%test_module "transaction_status" =
           ~consensus_constants:precomputed_values.consensus_constants
           ~time_controller ~logger ~frontier_broadcast_pipe
           ~log_gossip_heard:false ~on_remote_push:(Fn.const Deferred.unit)
+          ~block_window_duration
       in
       don't_wait_for
       @@ Linear_pipe.iter (Transaction_pool.broadcasts transaction_pool)
-           ~f:(fun transactions ->
+           ~f:(fun Network_pool.With_nonce.{ message = transactions; _ } ->
              [%log trace]
                "Transactions have been applied successfully and is propagated \
                 throughout the 'network'"

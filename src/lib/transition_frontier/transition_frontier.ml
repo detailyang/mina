@@ -12,7 +12,7 @@ module Full_frontier = Full_frontier
 module Extensions = Extensions
 module Persistent_root = Persistent_root
 module Persistent_frontier = Persistent_frontier
-module Catchup_tree = Catchup_tree
+module Catchup_state = Catchup_state
 module Full_catchup_tree = Full_catchup_tree
 module Catchup_hash_tree = Catchup_hash_tree
 
@@ -24,6 +24,8 @@ module type CONTEXT = sig
   val constraint_constants : Genesis_constants.Constraint_constants.t
 
   val consensus_constants : Consensus.Constants.t
+
+  val proof_cache_db : Proof_cache_tag.cache_db
 end
 
 let max_catchup_chunk_length = 20
@@ -39,7 +41,7 @@ type t =
   { logger : Logger.t
   ; verifier : Verifier.t
   ; consensus_local_state : Consensus.Data.Local_state.t
-  ; catchup_tree : Catchup_tree.t
+  ; catchup_state : Catchup_state.t
   ; full_frontier : Full_frontier.t
   ; persistent_root : Persistent_root.t
   ; persistent_root_instance : Persistent_root.Instance.t
@@ -50,7 +52,7 @@ type t =
   ; closed : unit Ivar.t
   }
 
-let catchup_tree t = t.catchup_tree
+let catchup_state t = t.catchup_state
 
 type Structured_log_events.t += Added_breadcrumb_user_commands
   [@@deriving register_event]
@@ -62,6 +64,19 @@ type Structured_log_events.t += Applying_diffs of { diffs : Yojson.Safe.t list }
 
 type Structured_log_events.t += Persisted_frontier_loaded
   [@@deriving register_event]
+
+type Structured_log_events.t += Transition_frontier_loaded_from_persistence
+  [@@deriving register_event]
+
+type Structured_log_events.t += Persisted_frontier_fresh_boot
+  [@@deriving
+    register_event { msg = "Persistent frontier database does not exist" }]
+
+type Structured_log_events.t += Bootstrap_required
+  [@@deriving register_event { msg = "Bootstrap required" }]
+
+type Structured_log_events.t += Persisted_frontier_dropped
+  [@@deriving register_event { msg = "Persistent frontier dropped" }]
 
 let genesis_root_data ~precomputed_values =
   let transition =
@@ -149,8 +164,9 @@ let load_from_persistence_and_start ~context:(module Context : CONTEXT)
                  (Persistent_frontier.Database.Error.not_found_message err) ) )
   in
   { logger
-  ; catchup_tree =
-      Catchup_tree.create catchup_mode ~root:(Full_frontier.root full_frontier)
+  ; catchup_state =
+      Catchup_state.create catchup_mode ~logger
+        ~root:(Full_frontier.root full_frontier)
   ; verifier
   ; consensus_local_state
   ; full_frontier
@@ -163,6 +179,14 @@ let load_from_persistence_and_start ~context:(module Context : CONTEXT)
   ; genesis_state_hash =
       (Precomputed_values.genesis_state_hashes precomputed_values).state_hash
   }
+
+let time ~logger ~label f =
+  let start = Time.now () in
+  let x = f () in
+  let stop = Time.now () in
+  [%log info] "%s took %s" label
+    (Time.Span.to_string_hum (Time.diff stop start)) ;
+  x
 
 let rec load_with_max_length :
        context:(module CONTEXT)
@@ -202,6 +226,7 @@ let rec load_with_max_length :
             [ ("error", `String "SNARKed ledger mismatch on load from disk")
             ; ("expected_snarked_ledger_hash", snarked_ledger_hash_json)
             ] ;
+        [%str_log debug] Persisted_frontier_dropped ;
         let%map () =
           Persistent_frontier.Instance.destroy persistent_frontier_instance
         in
@@ -223,6 +248,7 @@ let rec load_with_max_length :
               | `Failure msg ->
                   sprintf "Failure: %s" msg
               | `Bootstrap_required ->
+                  [%str_log info] Bootstrap_required ;
                   "Bootstrap required"
               (* next two cases aren't reachable, needed for types to work out *)
               | `Snarked_ledger_mismatch | `Persistent_frontier_malformed ->
@@ -233,7 +259,7 @@ let rec load_with_max_length :
                 [ ("error", `String err_str)
                 ; ("expected_snarked_ledger_hash", snarked_ledger_hash_json)
                 ] ;
-
+            [%str_log debug] Persisted_frontier_dropped ;
             let%map () =
               Persistent_frontier.Instance.destroy persistent_frontier_instance
             in
@@ -245,8 +271,9 @@ let rec load_with_max_length :
   in
   let reset_and_continue ?(destroy_frontier_instance = true) () =
     let%bind () =
-      if destroy_frontier_instance then
-        Persistent_frontier.Instance.destroy persistent_frontier_instance
+      if destroy_frontier_instance then (
+        [%str_log debug] Persisted_frontier_dropped ;
+        Persistent_frontier.Instance.destroy persistent_frontier_instance )
       else return ()
     in
     let%bind () =
@@ -267,6 +294,8 @@ let rec load_with_max_length :
       ~snarked_ledger_hash:genesis_ledger_hash
   in
   match
+    time ~label:"Persistent_frontier.Instsance.check_database" ~logger
+    @@ fun () ->
     Persistent_frontier.Instance.check_database
       ~genesis_state_hash:
         (State_hash.With_state_hashes.state_hash
@@ -277,7 +306,7 @@ let rec load_with_max_length :
       (* TODO: this case can be optimized to not create the
          * database twice through rocks -- currently on clean bootup,
          * this code path will reinitialize the rocksdb twice *)
-      [%log info] "persistent frontier database does not exist" ;
+      [%str_log info] Persisted_frontier_fresh_boot ;
       reset_and_continue ()
   | Error `Invalid_version ->
       [%log info] "persistent frontier database out of date" ;
@@ -301,6 +330,7 @@ let rec load_with_max_length :
       if retry_with_fresh_db then (
         (* should retry be on by default? this could be unnecessarily destructive *)
         [%log info] "destroying old persistent frontier database " ;
+        [%str_log debug] Persisted_frontier_dropped ;
         let%bind () =
           Persistent_frontier.Instance.destroy persistent_frontier_instance
         in
@@ -334,19 +364,22 @@ let rec load_with_max_length :
           *)
           reset_and_continue ~destroy_frontier_instance:false ()
       | res ->
+          [%str_log trace] Transition_frontier_loaded_from_persistence ;
           return res )
 
 let load ?(retry_with_fresh_db = true) ~context:(module Context : CONTEXT)
     ~verifier ~consensus_local_state ~persistent_root ~persistent_frontier
     ~catchup_mode () =
   let open Context in
-  let max_length =
-    global_max_length (Precomputed_values.genesis_constants precomputed_values)
-  in
-  load_with_max_length
-    ~context:(module Context)
-    ~max_length ~retry_with_fresh_db ~verifier ~consensus_local_state
-    ~persistent_root ~persistent_frontier ~catchup_mode ()
+  O1trace.thread "transition_frontier_load" (fun () ->
+      let max_length =
+        global_max_length
+          (Precomputed_values.genesis_constants precomputed_values)
+      in
+      load_with_max_length
+        ~context:(module Context)
+        ~max_length ~retry_with_fresh_db ~verifier ~consensus_local_state
+        ~persistent_root ~persistent_frontier ~catchup_mode () )
 
 (* The persistent root and persistent frontier as safe to ignore here
  * because their lifecycle is longer than the transition frontier's *)
@@ -354,7 +387,7 @@ let close ~loc
     { logger
     ; verifier = _
     ; consensus_local_state = _
-    ; catchup_tree = _
+    ; catchup_state = _
     ; full_frontier
     ; persistent_root = _safe_to_ignore_1
     ; persistent_root_instance
@@ -388,7 +421,14 @@ let root_snarked_ledger { persistent_root_instance; _ } =
 
 let add_breadcrumb_exn t breadcrumb =
   let open Deferred.Let_syntax in
+  let state_hash = Breadcrumb.state_hash breadcrumb in
+  Internal_tracing.with_state_hash state_hash
+  @@ fun () ->
+  let logger = t.logger in
+  [%log internal] "Add_breadcrumb_to_frontier" ;
+  [%log internal] "Calculate_diffs" ;
   let diffs = Full_frontier.calculate_diffs t.full_frontier breadcrumb in
+  [%log internal] "Calculate_diffs_done" ;
   [%log' trace t.logger]
     ~metadata:
       [ ( "state_hash"
@@ -400,15 +440,19 @@ let add_breadcrumb_exn t breadcrumb =
     "PRE: ($state_hash, $n)" ;
   [%str_log' trace t.logger]
     (Applying_diffs { diffs = List.map ~f:Diff.Full.E.to_yojson diffs }) ;
-  Catchup_tree.apply_diffs t.catchup_tree diffs ;
+  [%log internal] "Apply_catchup_state_diffs" ;
+  Catchup_state.apply_diffs t.catchup_state diffs ;
+  [%log internal] "Apply_full_frontier_diffs"
+    ~metadata:[ ("count", `Int (List.length diffs)) ] ;
   let (`New_root_and_diffs_with_mutants
         (new_root_identifier, diffs_with_mutants) ) =
     (* Root DB moves here *)
     Full_frontier.apply_diffs t.full_frontier diffs
       ~has_long_catchup_job:
-        (Catchup_tree.max_catchup_chain_length t.catchup_tree > 5)
+        (Catchup_state.max_catchup_chain_length t.catchup_state > 5)
       ~enable_epoch_ledger_sync:(`Enabled (root_snarked_ledger t))
   in
+  [%log internal] "Apply_full_frontier_diffs_done" ;
   Option.iter new_root_identifier
     ~f:(Persistent_root.Instance.set_root_identifier t.persistent_root_instance) ;
   [%log' trace t.logger]
@@ -424,17 +468,21 @@ let add_breadcrumb_exn t breadcrumb =
     Mina_block.Validated.valid_commands
     @@ Breadcrumb.validated_transition breadcrumb
   in
+  let tx_hash_json =
+    Fn.compose
+      Mina_transaction.Transaction_hash.(Fn.compose to_yojson hash_command)
+      User_command.forget_check
+  in
   [%str_log' trace t.logger] Added_breadcrumb_user_commands
     ~metadata:
       [ ( "user_commands"
-        , `List
-            (List.map user_cmds
-               ~f:(With_status.to_yojson User_command.Valid.to_yojson) ) )
+        , `List (List.map user_cmds ~f:(With_status.to_yojson tx_hash_json)) )
       ; ("state_hash", State_hash.to_yojson (Breadcrumb.state_hash breadcrumb))
       ] ;
   let lite_diffs =
     List.map diffs ~f:Diff.(fun (Full.E.E diff) -> Lite.E.E (to_lite diff))
   in
+  [%log internal] "Synchronize_persistent_frontier" ;
   let%bind sync_result =
     (* Diffs get put into a buffer here. They're processed asynchronously, except for root transitions *)
     Persistent_frontier.Instance.notify_sync t.persistent_frontier_instance
@@ -447,7 +495,14 @@ let add_breadcrumb_exn t breadcrumb =
             running, which indicates that transition frontier initialization \
             has not been performed correctly" )
   |> Result.ok_exn ;
-  Extensions.notify t.extensions ~frontier:t.full_frontier ~diffs_with_mutants
+  [%log internal] "Synchronize_persistent_frontier_done" ;
+  [%log internal] "Notify_frontier_extensions" ;
+  let%map () =
+    Extensions.notify t.extensions ~logger ~frontier:t.full_frontier
+      ~diffs_with_mutants
+  in
+  [%log internal] "Notify_frontier_extensions_done" ;
+  [%log internal] "Add_breadcrumb_to_frontier_done"
 
 (* proxy full frontier functions *)
 include struct
@@ -556,7 +611,6 @@ module For_tests = struct
     let constraint_constants = precomputed_values.constraint_constants in
     Quickcheck.Generator.create (fun ~size:_ ~random:_ ->
         let transition_receipt_time = Some (Time.now ()) in
-        Protocol_version.(set_current zero) ;
         let genesis_transition =
           Mina_block.Validated.lift (Mina_block.genesis ~precomputed_values)
         in
@@ -668,6 +722,8 @@ module For_tests = struct
       let constraint_constants = precomputed_values.constraint_constants
 
       let consensus_constants = precomputed_values.consensus_constants
+
+      let proof_cache_db = Proof_cache_tag.For_tests.create_db ()
     end in
     let open Context in
     let open Quickcheck.Generator.Let_syntax in

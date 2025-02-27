@@ -22,6 +22,10 @@ end
 
 let validation (_, v) = v
 
+let header_with_hash (b, _) = b
+
+let header (b, _) = With_hash.data b
+
 let block_with_hash (b, _) = b
 
 let block (b, _) = With_hash.data b
@@ -262,7 +266,7 @@ end
 let validate_time_received ~(precomputed_values : Precomputed_values.t)
     ~time_received (t, validation) =
   let consensus_state =
-    t |> With_hash.data |> Block.header |> Header.protocol_state
+    t |> With_hash.data |> Header.protocol_state
     |> Protocol_state.consensus_state
   in
   let constants = precomputed_values.consensus_constants in
@@ -283,7 +287,7 @@ let skip_time_received_validation `This_block_was_not_received_via_gossip
   (t, Unsafe.set_valid_time_received validation)
 
 let validate_genesis_protocol_state ~genesis_state_hash (t, validation) =
-  let state = t |> With_hash.data |> Block.header |> Header.protocol_state in
+  let state = t |> With_hash.data |> Header.protocol_state in
   if
     State_hash.equal
       (Protocol_state.genesis_state_hash state)
@@ -328,7 +332,7 @@ let validate_proofs ~verifier ~genesis_state_hash tvs =
           *)
           None
         else
-          let header = Block.header @@ With_hash.data t in
+          let header = With_hash.data t in
           Some
             (Blockchain_snark.Blockchain.create
                ~state:(Header.protocol_state header)
@@ -338,16 +342,16 @@ let validate_proofs ~verifier ~genesis_state_hash tvs =
     match to_verify with
     | [] ->
         (* Skip calling the verifier, nothing here to verify. *)
-        return (Ok true)
+        return (Ok (Ok ()))
     | _ ->
         Verifier.verify_blockchain_snarks verifier to_verify
   with
-  | Ok verified ->
-      if verified then
-        Ok
-          (List.map tvs ~f:(fun (t, validation) ->
-               (t, Unsafe.set_valid_proof validation) ) )
-      else Error `Invalid_proof
+  | Ok (Ok ()) ->
+      Ok
+        (List.map tvs ~f:(fun (t, validation) ->
+             (t, Unsafe.set_valid_proof validation) ) )
+  | Ok (Error err) ->
+      Error (`Invalid_proof err)
   | Error e ->
       Error (`Verifier_error e)
 
@@ -367,7 +371,7 @@ let extract_delta_block_chain_witness = function
       failwith "why can't this be refuted?"
 
 let validate_delta_block_chain (t, validation) =
-  let header = t |> With_hash.data |> Block.header in
+  let header = t |> With_hash.data in
   match
     Transition_chain_verifier.verify
       ~target_hash:
@@ -389,8 +393,9 @@ let skip_delta_block_chain_validation `This_block_was_not_received_via_gossip
   , Unsafe.set_valid_delta_block_chain validation
       (Mina_stdlib.Nonempty_list.singleton previous_protocol_state_hash) )
 
-let validate_frontier_dependencies ~context:(module Context : CONTEXT)
-    ~root_block ~get_block_by_hash (t, validation) =
+let validate_frontier_dependencies ~to_header
+    ~context:(module Context : CONTEXT) ~root_block ~is_block_in_frontier
+    (t, validation) =
   let module Context = struct
     include Context
 
@@ -402,7 +407,14 @@ let validate_frontier_dependencies ~context:(module Context : CONTEXT)
   end in
   let open Result.Let_syntax in
   let hash = State_hash.With_state_hashes.state_hash t in
-  let protocol_state = Fn.compose Header.protocol_state Block.header in
+  let protocol_state = Fn.compose Header.protocol_state to_header in
+  let root_consensus_state =
+    With_hash.map
+      ~f:
+        (Fn.compose Protocol_state.consensus_state
+           (Fn.compose Header.protocol_state Block.header) )
+      root_block
+  in
   let parent_hash =
     Protocol_state.previous_state_hash (protocol_state @@ With_hash.data t)
   in
@@ -411,7 +423,7 @@ let validate_frontier_dependencies ~context:(module Context : CONTEXT)
   in
   let%bind () =
     Result.ok_if_true
-      (hash |> get_block_by_hash |> Option.is_none)
+      (not @@ is_block_in_frontier hash)
       ~error:`Already_in_frontier
   in
   let%bind () =
@@ -421,13 +433,13 @@ let validate_frontier_dependencies ~context:(module Context : CONTEXT)
       ( `Take
       = Consensus.Hooks.select
           ~context:(module Context)
-          ~existing:(With_hash.map ~f:consensus_state root_block)
+          ~existing:root_consensus_state
           ~candidate:(With_hash.map ~f:consensus_state t) )
       ~error:`Not_selected_over_frontier_root
   in
   let%map () =
     Result.ok_if_true
-      (parent_hash |> get_block_by_hash |> Option.is_some)
+      (is_block_in_frontier parent_hash)
       ~error:`Parent_missing_from_frontier
   in
   (t, Unsafe.set_valid_frontier_dependencies validation)
@@ -458,22 +470,24 @@ let reset_frontier_dependencies_validation (transition_with_hash, validation) =
   | _ ->
       failwith "why can't this be refuted?"
 
-let validate_staged_ledger_diff ?skip_staged_ledger_verification ~logger
-    ~precomputed_values ~verifier ~parent_staged_ledger ~parent_protocol_state
-    (t, validation) =
-  let target_hash_of_ledger_proof =
-    Fn.compose Registers.ledger
-    @@ Fn.compose Ledger_proof.statement_target Ledger_proof.statement
-  in
+let validate_staged_ledger_diff ?skip_staged_ledger_verification ~proof_cache_db
+    ~logger ~get_completed_work ~precomputed_values ~verifier
+    ~parent_staged_ledger ~parent_protocol_state (t, validation) =
+  [%log internal] "Validate_staged_ledger_diff" ;
   let block = With_hash.data t in
   let header = Block.header block in
   let protocol_state = Header.protocol_state header in
   let blockchain_state = Protocol_state.blockchain_state protocol_state in
   let consensus_state = Protocol_state.consensus_state protocol_state in
+  let global_slot = Consensus_state.global_slot_since_genesis consensus_state in
   let body = Block.body block in
   let apply_start_time = Core.Time.now () in
   let body_ref_from_header = Blockchain_state.body_reference blockchain_state in
-  let body_ref_computed = Staged_ledger_diff.Body.compute_reference body in
+  let body_ref_computed =
+    Staged_ledger_diff.Body.compute_reference
+      ~tag:Mina_net2.Bitswap_tag.(to_enum Body)
+      body
+  in
   let%bind.Deferred.Result () =
     if Blake2.equal body_ref_computed body_ref_from_header then
       Deferred.Result.return ()
@@ -483,10 +497,11 @@ let validate_staged_ledger_diff ?skip_staged_ledger_verification ~logger
                            , `Ledger_proof proof_opt
                            , `Staged_ledger transitioned_staged_ledger
                            , `Pending_coinbase_update _ ) =
-    Staged_ledger.apply ?skip_verification:skip_staged_ledger_verification
+    Staged_ledger.apply ~proof_cache_db
+      ?skip_verification:skip_staged_ledger_verification ~get_completed_work
       ~constraint_constants:
-        precomputed_values.Precomputed_values.constraint_constants ~logger
-      ~verifier parent_staged_ledger
+        precomputed_values.Precomputed_values.constraint_constants ~global_slot
+      ~logger ~verifier parent_staged_ledger
       (Staged_ledger_diff.Body.staged_ledger_diff body)
       ~current_state_view:
         Mina_state.Protocol_state.(Body.view @@ body parent_protocol_state)
@@ -500,6 +515,9 @@ let validate_staged_ledger_diff ?skip_staged_ledger_verification ~logger
       ~coinbase_receiver:(Consensus_state.coinbase_receiver consensus_state)
       ~supercharge_coinbase:
         (Consensus_state.supercharge_coinbase consensus_state)
+      ~zkapp_cmd_limit_hardcap:
+        precomputed_values.Precomputed_values.genesis_constants
+          .zkapp_cmd_limit_hardcap
     |> Deferred.Result.map_error ~f:(fun e ->
            `Staged_ledger_application_failed e )
   in
@@ -509,43 +527,40 @@ let validate_staged_ledger_diff ?skip_staged_ledger_verification ~logger
         , `Float Core.Time.(Span.to_ms @@ diff (now ()) apply_start_time) )
       ]
     "Staged_ledger.apply takes $time_elapsed" ;
-  let target_ledger_hash =
+  let snarked_ledger_hash =
     match proof_opt with
     | None ->
-        Option.value_map
-          (Staged_ledger.current_ledger_proof transitioned_staged_ledger)
-          ~f:target_hash_of_ledger_proof
-          ~default:
-            ( Precomputed_values.genesis_ledger precomputed_values
-            |> Lazy.force |> Mina_ledger.Ledger.merkle_root
-            |> Frozen_ledger_hash.of_ledger_hash )
+        (*There was no proof emitted, snarked ledger hash shouldn't change*)
+        Protocol_state.snarked_ledger_hash parent_protocol_state
     | Some (proof, _) ->
-        target_hash_of_ledger_proof proof
+        Mina_state.Snarked_ledger_state.snarked_ledger_hash
+        @@ Ledger_proof.Cached.statement proof
   in
-  let maybe_errors =
-    Option.all
-      [ Option.some_if
-          (not
-             (Staged_ledger_hash.equal staged_ledger_hash
-                (Blockchain_state.staged_ledger_hash blockchain_state) ) )
-          `Incorrect_target_staged_ledger_hash
-      ; Option.some_if
-          (not
-             (Frozen_ledger_hash.equal target_ledger_hash
-                (Blockchain_state.snarked_ledger_hash blockchain_state) ) )
-          `Incorrect_target_snarked_ledger_hash
+  let hash_errors =
+    Result.combine_errors_unit
+      [ ( if
+          Staged_ledger_hash.equal staged_ledger_hash
+            (Blockchain_state.staged_ledger_hash blockchain_state)
+        then Ok ()
+        else Error `Incorrect_target_staged_ledger_hash )
+      ; ( if
+          Frozen_ledger_hash.equal snarked_ledger_hash
+            (Blockchain_state.snarked_ledger_hash blockchain_state)
+        then Ok ()
+        else Error `Incorrect_target_snarked_ledger_hash )
       ]
   in
   Deferred.return
-    ( match maybe_errors with
-    | Some errors ->
-        Error (`Invalid_staged_ledger_diff errors)
-    | None ->
-        Ok
-          ( `Just_emitted_a_proof (Option.is_some proof_opt)
-          , `Block_with_validation
-              (t, Unsafe.set_valid_staged_ledger_diff validation)
-          , `Staged_ledger transitioned_staged_ledger ) )
+  @@
+  match hash_errors with
+  | Ok () ->
+      Ok
+        ( `Just_emitted_a_proof (Option.is_some proof_opt)
+        , `Block_with_validation
+            (t, Unsafe.set_valid_staged_ledger_diff validation)
+        , `Staged_ledger transitioned_staged_ledger )
+  | Error errors ->
+      Error (`Invalid_staged_ledger_diff errors)
 
 let validate_staged_ledger_hash
     (`Staged_ledger_already_materialized staged_ledger_hash) (t, validation) =
@@ -585,7 +600,7 @@ let reset_staged_ledger_diff_validation (transition_with_hash, validation) =
 
 let validate_protocol_versions (t, validation) =
   let { Header.valid_current; valid_next; matches_daemon } =
-    t |> With_hash.data |> Block.header |> Header.protocol_version_status
+    t |> With_hash.data |> Header.protocol_version_status
   in
   if not (valid_current && valid_next) then Error `Invalid_protocol_version
   else if not matches_daemon then Error `Mismatched_protocol_version
@@ -594,3 +609,11 @@ let validate_protocol_versions (t, validation) =
 let skip_protocol_versions_validation `This_block_has_valid_protocol_versions
     (t, validation) =
   (t, Unsafe.set_valid_protocol_versions validation)
+
+let with_body (header_with_hash, validation) body =
+  ( With_hash.map ~f:(fun header -> Block.create ~header ~body) header_with_hash
+  , validation )
+
+let wrap_header t : fully_invalid_with_header = (t, fully_invalid)
+
+let to_header (b, v) = (With_hash.map ~f:Block.header b, v)

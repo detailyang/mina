@@ -6,13 +6,13 @@ module Stable : sig
   [@@@no_toplevel_latest_type]
 
   module V2 : sig
-    type t [@@deriving sexp, to_yojson, equal]
+    type t [@@deriving sexp, equal]
   end
 end]
 
-type t = Stable.Latest.t [@@deriving sexp, to_yojson, equal]
+type t = Stable.Latest.t [@@deriving to_yojson]
 
-type with_hash = t State_hash.With_state_hashes.t [@@deriving sexp]
+type with_hash = t State_hash.With_state_hashes.t
 
 (* TODO: interface for both unchecked and checked construction of blocks *)
 (* check version needs to run following checks:
@@ -35,7 +35,7 @@ val transactions :
   -> t
   -> Transaction.t With_status.t list
 
-val payments : t -> Signed_command.t With_status.t list
-
 val account_ids_accessed :
-  t -> (Account_id.t * [ `Accessed | `Not_accessed ]) list
+     constraint_constants:Genesis_constants.Constraint_constants.t
+  -> t
+  -> (Account_id.t * [ `Accessed | `Not_accessed ]) list

@@ -29,6 +29,9 @@ pub mod projective;
 /// SRS
 pub mod srs;
 
+pub mod lagrange_basis;
+pub use lagrange_basis::WithLagrangeBasis;
+
 /// Indexes
 pub mod pasta_fp_plonk_index;
 pub mod pasta_fq_plonk_index;
@@ -55,13 +58,18 @@ pub mod linearization;
 
 /// Handy re-exports
 pub use {
-    commitment_dlog::commitment::caml::{CamlOpeningProof, CamlPolyComm},
     kimchi::circuits::{
         gate::{caml::CamlCircuitGate, CurrOrNext, GateType},
         scalars::caml::CamlRandomOracles,
         wires::caml::CamlWire,
     },
-    kimchi::proof::caml::{CamlLookupEvaluations, CamlProofEvaluations},
-    kimchi::prover::caml::{CamlLookupCommitments, CamlProverCommitments, CamlProverProof},
+    kimchi::proof::caml::CamlProofEvaluations,
+    kimchi::prover::caml::{
+        CamlLookupCommitments, CamlProofWithPublic, CamlProverCommitments, CamlProverProof,
+    },
     mina_poseidon::sponge::caml::CamlScalarChallenge,
+    poly_commitment::{
+        ipa::caml::CamlOpeningProof,
+        commitment::caml::CamlPolyComm,
+    },
 };
