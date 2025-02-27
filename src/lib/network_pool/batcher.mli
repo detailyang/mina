@@ -9,7 +9,7 @@ module Snark_pool : sig
 
   type t [@@deriving sexp]
 
-  val create : Verifier.t -> t
+  val create : logger:Logger.t -> Verifier.t -> t
 
   val verify : t -> proof_envelope -> bool Deferred.Or_error.t
 end
@@ -18,13 +18,13 @@ type ('initial, 'partially_validated, 'result) t
 
 val create :
      ?how_to_add:[ `Insert | `Enqueue_back ]
-  -> ?logger:Logger.t
+  -> logger:Logger.t
   -> ?compare_init:('init -> 'init -> int)
   -> ?weight:('init -> int)
   -> ?max_weight_per_call:int
   -> (   [ `Init of 'init | `Partially_validated of 'partially_validated ] list
       -> [ `Valid of 'result
-         | `Potentially_invalid of 'partially_validated
+         | `Potentially_invalid of 'partially_validated * Error.t
          | Verifier.invalid ]
          list
          Deferred.Or_error.t )
@@ -42,7 +42,7 @@ module Transaction_pool : sig
 
   type t [@@deriving sexp]
 
-  val create : Verifier.t -> t
+  val create : logger:Logger.t -> Verifier.t -> t
 
   val verify :
        t

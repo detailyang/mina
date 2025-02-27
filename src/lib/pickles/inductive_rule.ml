@@ -1,4 +1,3 @@
-open Core_kernel
 open Pickles_types.Poly_types
 open Pickles_types.Hlist
 
@@ -9,7 +8,7 @@ end
 module Previous_proof_statement = struct
   type ('prev_var, 'width) t =
     { public_input : 'prev_var
-    ; proof : ('width, 'width) Proof.t Impls.Step.As_prover.Ref.t
+    ; proof : ('width, 'width) Proof.t Impls.Step.Typ.prover_value
     ; proof_must_verify : B.t
     }
 
@@ -64,7 +63,11 @@ type ('prev_vars, 'widths, 'public_output, 'auxiliary_output) main_return =
         *)
   }
 
-(** This type models an "inductive rule". It includes
+module Make (M : sig
+  type _ t
+end) =
+struct
+  (** This type models an "inductive rule". It includes
     - the list of previous statements which this one assumes
     - the snarky main function
 
@@ -99,44 +102,49 @@ type ('prev_vars, 'widths, 'public_output, 'auxiliary_output) main_return =
     - ['auxiliary_value] is the out-of-circuit type of the [main] function's
       auxiliary data, to be returned to the prover but not exposed in the
       public input.
-*)
-type ( 'prev_vars
-     , 'prev_values
-     , 'widths
-     , 'heights
-     , 'a_var
-     , 'a_value
-     , 'ret_var
-     , 'ret_value
-     , 'auxiliary_var
-     , 'auxiliary_value )
-     t =
-  { identifier : string
-  ; prevs : ('prev_vars, 'prev_values, 'widths, 'heights) H4.T(Tag).t
-  ; main :
-         'a_var main_input
-      -> ('prev_vars, 'widths, 'ret_var, 'auxiliary_var) main_return
-  ; uses_lookup : bool
-  }
+  *)
+  type ( 'prev_vars
+       , 'prev_values
+       , 'widths
+       , 'heights
+       , 'a_var
+       , 'a_value
+       , 'ret_var
+       , 'ret_value
+       , 'auxiliary_var
+       , 'auxiliary_value )
+       t =
+    { identifier : string
+    ; prevs : ('prev_vars, 'prev_values, 'widths, 'heights) H4.T(Tag).t
+    ; main :
+           'a_var main_input
+        -> ('prev_vars, 'widths, 'ret_var, 'auxiliary_var) main_return M.t
+    ; feature_flags : bool Pickles_types.Plonk_types.Features.t
+    }
 
-module T
-    (Statement : T0)
-    (Statement_value : T0)
-    (Return_var : T0)
-    (Return_value : T0)
-    (Auxiliary_var : T0)
-    (Auxiliary_value : T0) =
-struct
-  type nonrec ('prev_vars, 'prev_values, 'widths, 'heights) t =
-    ( 'prev_vars
-    , 'prev_values
-    , 'widths
-    , 'heights
-    , Statement.t
-    , Statement_value.t
-    , Return_var.t
-    , Return_value.t
-    , Auxiliary_var.t
-    , Auxiliary_value.t )
-    t
+  module T
+      (Statement : T0)
+      (Statement_value : T0)
+      (Return_var : T0)
+      (Return_value : T0)
+      (Auxiliary_var : T0)
+      (Auxiliary_value : T0) =
+  struct
+    type nonrec ('prev_vars, 'prev_values, 'widths, 'heights) t =
+      ( 'prev_vars
+      , 'prev_values
+      , 'widths
+      , 'heights
+      , Statement.t
+      , Statement_value.t
+      , Return_var.t
+      , Return_value.t
+      , Auxiliary_var.t
+      , Auxiliary_value.t )
+      t
+  end
 end
+
+module Promise = Make (Promise)
+module Deferred = Make (Async_kernel.Deferred)
+include Make (Id)

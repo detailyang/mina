@@ -9,16 +9,25 @@ open Mina_base
 
 let%test_module "Zkapp payments tests" =
   ( module struct
+    let proof_cache =
+      Result.ok_or_failwith @@ Pickles.Proof_cache.of_yojson
+      @@ Yojson.Safe.from_file "proof_cache.json"
+
+    let () = Transaction_snark.For_tests.set_proof_cache proof_cache
+
     let memo = Signed_command_memo.create_from_string_exn "Zkapp payments tests"
 
     [@@@warning "-32"]
 
     let constraint_constants = U.constraint_constants
 
-    let merkle_root_after_zkapp_command_exn t ~txn_state_view txn =
+    let merkle_root_after_zkapp_command_exn t
+        ~(txn_state_view : Zkapp_precondition.Protocol_state.View.t)
+        ~global_slot txn =
       let hash =
         Ledger.merkle_root_after_zkapp_command_exn
-          ~constraint_constants:U.constraint_constants ~txn_state_view t txn
+          ~constraint_constants:U.constraint_constants ~global_slot
+          ~txn_state_view t txn
       in
       Frozen_ledger_hash.of_ledger_hash hash
 
@@ -71,10 +80,11 @@ let%test_module "Zkapp payments tests" =
                   ; preconditions =
                       { Account_update.Preconditions.network =
                           Zkapp_precondition.Protocol_state.accept
-                      ; account = Accept
+                      ; account = Zkapp_precondition.Account.accept
+                      ; valid_while = Ignore
                       }
                   ; use_full_commitment = false
-                  ; caller = Call
+                  ; may_use_token = No
                   ; authorization_kind = Signature
                   }
               ; authorization = Signature Signature.dummy
@@ -93,10 +103,11 @@ let%test_module "Zkapp payments tests" =
                   ; preconditions =
                       { Account_update.Preconditions.network =
                           Zkapp_precondition.Protocol_state.accept
-                      ; account = Accept
+                      ; account = Zkapp_precondition.Account.accept
+                      ; valid_while = Ignore
                       }
                   ; use_full_commitment = false
-                  ; caller = Call
+                  ; may_use_token = No
                   ; authorization_kind = None_given
                   }
               ; authorization = None_given
@@ -107,7 +118,7 @@ let%test_module "Zkapp payments tests" =
 
     let%test_unit "merkle_root_after_zkapp_command_exn_immutable" =
       Test_util.with_randomness 123456789 (fun () ->
-          let wallets = U.Wallet.random_wallets () in
+          let wallets = Quickcheck.random_value (U.Wallet.random_wallets ()) in
           Ledger.with_ledger ~depth:U.ledger_depth ~f:(fun ledger ->
               Array.iter
                 (Array.sub wallets ~pos:1 ~len:(Array.length wallets - 1))
@@ -129,37 +140,42 @@ let%test_module "Zkapp payments tests" =
                     =
                   Zkapp_command.Valid.to_valid_unsafe t1
                 in
-                merkle_root_after_zkapp_command_exn ledger ~txn_state_view t1
+                merkle_root_after_zkapp_command_exn ledger ~txn_state_view
+                  ~global_slot:
+                    Mina_numbers.Global_slot_since_genesis.(
+                      succ txn_state_view.global_slot_since_genesis)
+                  t1
               in
               let hash_post = Ledger.merkle_root ledger in
               [%test_eq: Field.t] hash_pre hash_post ) )
 
     let%test_unit "zkapps-based payment" =
       let open Mina_transaction_logic.For_tests in
-      Quickcheck.test ~trials:2 Test_spec.gen ~f:(fun { init_ledger; specs } ->
+      Quickcheck.test ~trials:2 (Test_spec.mk_gen ~num_transactions:3 ())
+        ~f:(fun { init_ledger; specs } ->
           Ledger.with_ledger ~depth:U.ledger_depth ~f:(fun ledger ->
-              let zkapp_command = account_update_send (List.hd_exn specs) in
-              Init_ledger.init (module Ledger.Ledger_inner) init_ledger ledger ;
-              ignore
-                ( U.apply_zkapp_command ledger [ zkapp_command ]
-                  : Sparse_ledger.t ) ) )
+              Async.Thread_safe.block_on_async_exn (fun () ->
+                  let zkapp_command = account_update_send (List.hd_exn specs) in
+                  Init_ledger.init
+                    (module Ledger.Ledger_inner)
+                    init_ledger ledger ;
+                  U.check_zkapp_command_with_merges_exn ledger [ zkapp_command ] ) ) )
 
     let%test_unit "Consecutive zkapps-based payments" =
       let open Mina_transaction_logic.For_tests in
       Quickcheck.test ~trials:2 Test_spec.gen ~f:(fun { init_ledger; specs } ->
           Ledger.with_ledger ~depth:U.ledger_depth ~f:(fun ledger ->
-              let zkapp_commands =
-                List.map
-                  ~f:(fun s ->
-                    let use_full_commitment =
-                      Quickcheck.random_value Bool.quickcheck_generator
-                    in
-                    account_update_send ~use_full_commitment s )
-                  specs
-              in
-              Init_ledger.init (module Ledger.Ledger_inner) init_ledger ledger ;
-              ignore
-                (U.apply_zkapp_command ledger zkapp_commands : Sparse_ledger.t) ) )
+              Async.Thread_safe.block_on_async_exn (fun () ->
+                  let zkapp_commands =
+                    List.map
+                      ~f:(fun s ->
+                        account_update_send ~double_sender_nonce:false s )
+                      specs
+                  in
+                  Init_ledger.init
+                    (module Ledger.Ledger_inner)
+                    init_ledger ledger ;
+                  U.check_zkapp_command_with_merges_exn ledger zkapp_commands ) ) )
 
     let%test_unit "multiple transfers from one account" =
       let open Mina_transaction_logic.For_tests in
@@ -183,6 +199,7 @@ let%test_module "Zkapp payments tests" =
                          (Amount.of_fee
                             constraint_constants.account_creation_fee ) )
                   in
+                  (*Make payments to two existing accounts (senders from the spec) and a new account*)
                   let test_spec : Spec.t =
                     { sender = spec.sender
                     ; fee
@@ -190,7 +207,10 @@ let%test_module "Zkapp payments tests" =
                     ; receivers =
                         (new_receiver, new_receiver_amount)
                         :: ( List.take specs (receiver_count - 1)
-                           |> List.map ~f:(fun s -> (s.receiver, amount)) )
+                           |> List.map ~f:(fun s ->
+                                  ( Signature_lib.Public_key.compress
+                                      (fst s.sender).public_key
+                                  , amount ) ) )
                     ; amount = total_amount
                     ; zkapp_account_keypairs = []
                     ; memo
@@ -203,7 +223,8 @@ let%test_module "Zkapp payments tests" =
                     }
                   in
                   let zkapp_command =
-                    Transaction_snark.For_tests.multiple_transfers test_spec
+                    Transaction_snark.For_tests.multiple_transfers
+                      ~constraint_constants test_spec
                   in
                   Init_ledger.init
                     (module Ledger.Ledger_inner)
@@ -269,9 +290,18 @@ let%test_module "Zkapp payments tests" =
                     }
                   in
                   let zkapp_command =
-                    Transaction_snark.For_tests.multiple_transfers test_spec
+                    Transaction_snark.For_tests.multiple_transfers
+                      ~constraint_constants test_spec
                   in
                   U.check_zkapp_command_with_merges_exn
-                    ~expected_failure:Transaction_status.Failure.Overflow ledger
-                    [ zkapp_command ] ) ) )
+                    ~expected_failure:
+                      (Transaction_status.Failure.Overflow, Pass_2)
+                    ledger [ zkapp_command ] ) ) )
+
+    let () =
+      match Sys.getenv "PROOF_CACHE_OUT" with
+      | Some path ->
+          Yojson.Safe.to_file path @@ Pickles.Proof_cache.to_yojson proof_cache
+      | None ->
+          ()
   end )

@@ -1,46 +1,69 @@
 let S = ../../Lib/SelectFiles.dhall
 
 let JobSpec = ../../Pipeline/JobSpec.dhall
+
 let Pipeline = ../../Pipeline/Dsl.dhall
+
+let PipelineMode = ../../Pipeline/Mode.dhall
+
+let PipelineTag = ../../Pipeline/Tag.dhall
 
 let TestExecutive = ../../Command/TestExecutive.dhall
 
-let dependsOn = [
-    { name = "TestnetIntegrationTests", key = "build-test-executive" },
-    { name = "MinaArtifactBullseye", key = "daemon-devnet-bullseye-docker-image" },
-    { name = "MinaArtifactBullseye", key = "archive-bullseye-docker-image" }
-]
-let dependsOnJs = [
-    { name = "TestnetIntegrationTests", key = "build-test-executive" },
-    { name = "TestnetIntegrationTests", key = "build-js-tests" },
-    { name = "MinaArtifactBullseye", key = "daemon-devnet-bullseye-docker-image" },
-    { name = "MinaArtifactBullseye", key = "archive-bullseye-docker-image" }
-]
+let Profiles = ../../Constants/Profiles.dhall
 
-in Pipeline.build Pipeline.Config::{
-  spec =
-    JobSpec::{
-    dirtyWhen = [
-        S.strictlyStart (S.contains "src"),
-        S.strictlyStart (S.contains "dockerfiles"),
-        S.strictlyStart (S.contains "buildkite/src/Jobs/Test/TestnetIntegrationTest"),
-        S.strictlyStart (S.contains "buildkite/src/Jobs/Command/TestExecutive")
-    ],
-    path = "Test",
-    name = "TestnetIntegrationTests"
-  },
-  steps = [
-    TestExecutive.build "integration_tests",
-    TestExecutive.buildJs "integration_tests",
-    TestExecutive.execute "peers-reliability" dependsOn,
-    TestExecutive.execute "chain-reliability" dependsOn,
-    TestExecutive.execute "payment" dependsOn,
-    TestExecutive.execute "delegation" dependsOn,
-    TestExecutive.execute "gossip-consis" dependsOn,
-    TestExecutive.execute "opt-block-prod" dependsOn,
-    TestExecutive.execute "medium-bootstrap" dependsOn,
-    TestExecutive.execute "zkapps" dependsOn,
-    TestExecutive.execute "zkapps-timing" dependsOn,
-    TestExecutive.executeWithJs "snarkyjs" dependsOnJs
-  ]
-}
+let Dockers = ../../Constants/DockerVersions.dhall
+
+let Network = ../../Constants/Network.dhall
+
+let Artifacts = ../../Constants/Artifacts.dhall
+
+let dependsOn =
+        Dockers.dependsOn
+          Dockers.Type.Bullseye
+          Network.Type.Devnet
+          Profiles.Type.Standard
+          Artifacts.Type.Daemon
+      # Dockers.dependsOn
+          Dockers.Type.Bullseye
+          Network.Type.Devnet
+          Profiles.Type.Standard
+          Artifacts.Type.Archive
+
+in  Pipeline.build
+      Pipeline.Config::{
+      , spec = JobSpec::{
+        , dirtyWhen =
+          [ S.strictlyStart (S.contains "src")
+          , S.strictlyStart (S.contains "dockerfiles")
+          , S.strictlyStart
+              (S.contains "buildkite/src/Jobs/Test/TestnetIntegrationTest")
+          , S.strictlyStart (S.contains "buildkite/src/Command/TestExecutive")
+          , S.strictlyStart
+              (S.contains "buildkite/scripts/run-test-executive-local")
+          ]
+        , path = "Test"
+        , name = "TestnetIntegrationTests"
+        , tags =
+          [ PipelineTag.Type.Long
+          , PipelineTag.Type.Test
+          , PipelineTag.Type.Stable
+          ]
+        , mode = PipelineMode.Type.Stable
+        }
+      , steps =
+        [ TestExecutive.executeLocal "peers-reliability" dependsOn
+        , TestExecutive.executeLocal "chain-reliability" dependsOn
+        , TestExecutive.executeLocal "payment" dependsOn
+        , TestExecutive.executeLocal "gossip-consis" dependsOn
+        , TestExecutive.executeLocal "block-prod-prio" dependsOn
+        , TestExecutive.executeLocal "medium-bootstrap" dependsOn
+        , TestExecutive.executeLocal "block-reward" dependsOn
+        , TestExecutive.executeLocal "zkapps" dependsOn
+        , TestExecutive.executeLocal "zkapps-timing" dependsOn
+        , TestExecutive.executeLocal "zkapps-nonce" dependsOn
+        , TestExecutive.executeLocal "verification-key" dependsOn
+        , TestExecutive.executeLocal "slot-end" dependsOn
+        , TestExecutive.executeLocal "epoch-ledger" dependsOn
+        ]
+      }

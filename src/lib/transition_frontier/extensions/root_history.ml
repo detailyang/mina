@@ -14,6 +14,8 @@ module T = struct
 
   type view = t
 
+  let name = "root_registry"
+
   let create ~logger:_ frontier =
     let capacity = 2 * Full_frontier.max_length frontier in
     let history = Queue.create () in
@@ -66,7 +68,7 @@ module T = struct
         (* TODO: send full diffs to extensions to avoid extra lookups in frontier *)
         | E (Root_transitioned { new_root; _ }, _) ->
             Full_frontier.find_exn frontier
-              (Root_data.Limited.hashes new_root).state_hash
+              (Root_data.Limited.Stable.Latest.hashes new_root).state_hash
             |> Root_data.Historical.of_breadcrumb |> enqueue root_history ;
             true
         | E _ ->

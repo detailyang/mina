@@ -90,32 +90,36 @@ module Make (Inputs : Inputs_intf) :
   let validate_proof ~verifier ~genesis_state_hash
       (transition_with_hash : Mina_block.with_hash) :
       Mina_block.initial_valid_block Deferred.Or_error.t =
-    let%map validation =
+    let validate (b, v) =
       let open Deferred.Result.Let_syntax in
+      let h = (With_hash.map ~f:Mina_block.header b, v) in
+      Deferred.return (Validation.validate_protocol_versions h)
+      >>= Fn.compose Deferred.return
+            (Validation.validate_genesis_protocol_state ~genesis_state_hash)
+      >>= Validation.validate_single_proof ~verifier ~genesis_state_hash
+      >>| Fn.flip Validation.with_body (Mina_block.body @@ With_hash.data b)
+    in
+    let%map validation =
       Validation.wrap transition_with_hash
       |> Validation.skip_time_received_validation
            `This_block_was_not_received_via_gossip
       |> Validation.skip_delta_block_chain_validation
            `This_block_was_not_received_via_gossip
-      |> Fn.compose Deferred.return Validation.validate_protocol_versions
-      >>= Fn.compose Deferred.return
-            (Validation.validate_genesis_protocol_state ~genesis_state_hash)
-      >>= Validation.validate_single_proof ~verifier ~genesis_state_hash
+      |> validate
     in
     match validation with
     | Ok block ->
         Ok block
-    | Error err ->
-        Or_error.error_string
-          ( match err with
-          | `Invalid_genesis_protocol_state ->
-              "invalid genesis state"
-          | `Invalid_protocol_version | `Mismatched_protocol_version ->
-              "invalid protocol version"
-          | `Invalid_proof ->
-              "invalid proof"
-          | `Verifier_error e ->
-              Printf.sprintf "verifier error: %s" (Error.to_string_hum e) )
+    | Error err -> (
+        match err with
+        | `Invalid_genesis_protocol_state ->
+            Or_error.error_string "invalid genesis state"
+        | `Invalid_protocol_version | `Mismatched_protocol_version ->
+            Or_error.error_string "invalid protocol version"
+        | `Invalid_proof e ->
+            Error (Error.tag ~tag:"invalid proof" e)
+        | `Verifier_error e ->
+            Error (Error.tag ~tag:"verifier proof" e) )
 
   let verify ~verifier ~genesis_constants ~precomputed_values
       { Proof_carrying_data.data = best_tip; proof = merkle_list, root } =

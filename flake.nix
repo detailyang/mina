@@ -7,11 +7,12 @@
     extra-trusted-public-keys = [
       "nix-cache.minaprotocol.org:fdcuDzmnM0Kbf7yU4yywBuUEJWClySc1WIF6t6Mm8h4="
       "nix-cache.minaprotocol.org:D3B1W+V7ND1Fmfii8EhbAbF1JXoe2Ct4N34OKChwk2c="
+      "mina-nix-cache-1:djtioLfv2oxuK2lqPUgmZbf8bY8sK/BnYZCU2iU5Q10="
     ];
   };
 
   inputs.utils.url = "github:gytis-ivaskevicius/flake-utils-plus";
-  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable-small";
+  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-23.11-small";
 
   inputs.mix-to-nix.url = "github:serokell/mix-to-nix";
   inputs.nix-npm-buildPackage.url = "github:serokell/nix-npm-buildpackage";
@@ -19,6 +20,17 @@
   inputs.opam-nix.url = "github:tweag/opam-nix";
   inputs.opam-nix.inputs.nixpkgs.follows = "nixpkgs";
   inputs.opam-nix.inputs.opam-repository.follows = "opam-repository";
+
+  inputs.dune-nix.url = "github:o1-labs/dune-nix";
+  inputs.dune-nix.inputs.nixpkgs.follows = "nixpkgs";
+  inputs.dune-nix.inputs.flake-utils.follows = "utils";
+
+  inputs.describe-dune.url = "github:o1-labs/describe-dune";
+  inputs.describe-dune.inputs.nixpkgs.follows = "nixpkgs";
+  inputs.describe-dune.inputs.flake-utils.follows = "utils";
+
+  inputs.o1-opam-repository.url = "github:o1-labs/opam-repository";
+  inputs.o1-opam-repository.flake = false;
 
   inputs.opam-repository.url = "github:ocaml/opam-repository";
   inputs.opam-repository.flake = false;
@@ -56,24 +68,31 @@
         ref = r: "[34;1m${r}[31;1m";
         command = c: "[37;1m${c}[31;1m";
       in lib.warnIf (!builtins.all (x: x)
-        (map (x: builtins.pathExists ./${x} && builtins.readDir ./${x} != { }) submodules)) ''
-          Some submodules are missing, you may get errors. Consider one of the following:
-          - run ${command "nix/pin.sh"} and use "${ref "mina"}" flake ref, e.g. ${command "nix develop mina"} or ${command "nix build mina"};
-          - use "${ref "git+file://$PWD?submodules=1"}";
-          - use "${ref "git+https://github.com/minaprotocol/mina?submodules=1"}";
-          - use non-flake commands like ${command "nix-build"} and ${command "nix-shell"}.
-        '';
+        (map (x: builtins.pathExists ./${x} && builtins.readDir ./${x} != { })
+          submodules)) ''
+            Some submodules are missing, you may get errors. Consider one of the following:
+            - run ${command "nix/pin.sh"} and use "${
+              ref "mina"
+            }" flake ref, e.g. ${command "nix develop mina"} or ${
+              command "nix build mina"
+            };
+            - use "${ref "git+file://$PWD?submodules=1"}";
+            - use "${
+              ref "git+https://github.com/minaprotocol/mina?submodules=1"
+            }";
+            - use non-flake commands like ${command "nix-build"} and ${
+              command "nix-shell"
+            }.
+          '';
     in {
       overlays = {
         misc = import ./nix/misc.nix;
         rust = import ./nix/rust.nix;
         go = import ./nix/go.nix;
         javascript = import ./nix/javascript.nix;
-        ocaml = final: prev: {
-          ocamlPackages_mina = requireSubmodules (import ./nix/ocaml.nix {
-            inherit inputs;
-            pkgs = final;
-          });
+        ocaml = pkgs: prev: {
+          ocamlPackages_mina =
+            requireSubmodules (import ./nix/ocaml.nix { inherit inputs pkgs; });
         };
       };
 
@@ -194,15 +213,7 @@
             { with-archive ? false }: {
               command =
                 runInEnv self.devShells.x86_64-linux.integration-tests ''
-                  export GOOGLE_CLOUD_KEYFILE_JSON=$AUTOMATED_VALIDATION_SERVICE_ACCOUNT
-                  export GCLOUD_API_KEY=$(cat $INTEGRATION_TEST_LOGS_GCLOUD_API_KEY_PATH)
-                  source $INTEGRATION_TEST_CREDENTIALS
-                  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-                  export KUBE_CONFIG_PATH=$$HOME/.kube/config
-                  gcloud auth activate-service-account --key-file=$AUTOMATED_VALIDATION_SERVICE_ACCOUNT automated-validation@o1labs-192920.iam.gserviceaccount.com --project o1labs-192920
-                  gcloud container clusters get-credentials --region us-west1 mina-integration-west1
-                  kubectl config use-context gke_o1labs-192920_us-west1_mina-integration-west1
-                  test_executive cloud ${test} \
+                  test_executive local ${test} \
                   --mina-image=${
                     dockerUrl "mina-image-full" "$BUILDKITE_COMMIT"
                   } \
@@ -213,14 +224,13 @@
               label = "Run ${test} integration test";
               depends_on = [ "push_mina-image-full" ]
                 ++ lib.optional with-archive "push_mina-archive-image-full";
-              "if" = ''build.pull_request.labels includes "nix-integration-tests"'';
+              "if" =
+                ''build.pull_request.labels includes "nix-integration-tests"'';
               retry = {
-                automatic = [
-                  {
-                    exit_status = "*";
-                    limit = 3;
-                  }
-                ];
+                automatic = [{
+                  exit_status = "*";
+                  limit = 3;
+                }];
               };
             };
         in {
@@ -251,6 +261,13 @@
         };
     } // utils.lib.eachDefaultSystem (system:
       let
+        rocksdbOverlay = pkgs: prev:
+          if prev.stdenv.isDarwin then {
+            rocksdb-mina = pkgs.rocksdb;
+          } else {
+            rocksdb-mina = pkgs.rocksdb511;
+          };
+
         # nixpkgs with all relevant overlays applied
         pkgs = nixpkgs.legacyPackages.${system}.extend
           (nixpkgs.lib.composeManyExtensions ([
@@ -264,7 +281,7 @@
                   nodejs = pkgs.nodejs-16_x;
                 };
             })
-          ] ++ builtins.attrValues self.overlays));
+          ] ++ builtins.attrValues self.overlays ++ [ rocksdbOverlay ]));
 
         checks = import ./nix/checks.nix inputs pkgs;
 
@@ -280,21 +297,41 @@
 
         # Packages for the development environment that are not needed to build mina-dev.
         # For instance dependencies for tests.
-        devShellPackages = [ pkgs.rosetta-cli ];
+        devShellPackages = with pkgs; [
+          rosetta-cli
+          wasm-pack
+          nodejs
+          binaryen
+          zip
+          (pkgs.python3.withPackages (python-pkgs: [
+              python-pkgs.click
+              python-pkgs.requests
+            ]))
+          jq
+        ];
       in {
         inherit ocamlPackages;
 
         # Main user-facing binaries.
         packages = rec {
           inherit (ocamlPackages)
-            mina mina_tests mina-ocaml-format mina_client_sdk test_executive;
+            mina devnet mainnet mina_tests mina-ocaml-format mina_client_sdk
+            test_executive with-instrumentation;
+          # Granular nix
+          inherit (ocamlPackages)
+            src exes all all-tested pkgs all-exes files tested info
+            dune-description base-libs external-libs;
+          # ^ TODO move elsewhere, external-libs isn't a package
+          # TODO consider the following: inherit (ocamlPackages) default;
+          granular = ocamlPackages.default;
+          default = ocamlPackages.mina;
           inherit (pkgs)
-            libp2p_helper kimchi_bindings_stubs client_sdk snarky_js leaderboard
-            mina-signer validation trace-tool zkapp-cli;
+            libp2p_helper kimchi_bindings_stubs snarky_js validation trace-tool
+            zkapp-cli;
           inherit (dockerImages)
-            mina-image-slim mina-image-full mina-archive-image-full;
+            mina-image-slim mina-image-full mina-archive-image-full
+            mina-image-instr-full;
           mina-deb = debianPackages.mina;
-          default = mina;
         };
 
         # Pure dev shell, from which you can build Mina yourself manually, or hack on it.
@@ -333,10 +370,6 @@
           '';
           buildInputs = [
             self.packages.${system}.test_executive
-            pkgs.kubectl
-            pkgs.google-cloud-sdk
-            pkgs.terraform
-            pkgs.curl
           ];
         };
         packages.impure-shell =
@@ -372,5 +405,7 @@
         });
 
         inherit checks;
+
+        formatter = pkgs.nixfmt;
       });
 }

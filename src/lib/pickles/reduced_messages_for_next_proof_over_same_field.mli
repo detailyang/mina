@@ -1,3 +1,7 @@
+(** Structures for message passing between proofs over the same field, passed
+    opaquely as a hash through the intermediate proof over the other field.
+*)
+
 module Step : sig
   module Stable : sig
     module V1 : sig
@@ -16,7 +20,7 @@ module Step : sig
         }
       [@@deriving sexp, yojson, sexp, compare, hash, equal, bin_shape, bin_io]
 
-      include Pickles_types.Sigs.VERSIONED
+      include Plonkish_prelude.Sigs.VERSIONED
     end
   end
 
@@ -66,7 +70,7 @@ module Wrap : sig
           Import.Types.Wrap_bp_vec.Stable.V1.t
         [@@deriving sexp, compare, yojson, hash, equal, bin_shape, bin_io]
 
-        include Pickles_types.Sigs.VERSIONED
+        include Plonkish_prelude.Sigs.VERSIONED
       end
     end
 

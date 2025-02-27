@@ -1,13 +1,5 @@
-open Core_kernel
-
-module type Field = sig
-  include Sponge.Intf.Field
-
-  val square : t -> t
-end
-
 module Make
-    (Impl : Snarky_backendless.Snark_intf.Run) (B : sig
+    (Impl : Kimchi_pasta_snarky_backend.Snark_intf) (B : sig
       open Impl
 
       val params : field Sponge.Params.t
@@ -21,6 +13,7 @@ module Make
     end) =
 struct
   include Make_sponge.Rounds
+  module Utils = Util.Make (Impl)
 
   let round_table start =
     let ({ round_constants; mds } : _ Sponge.Params.t) = B.params in
@@ -39,11 +32,10 @@ struct
     done ;
     res
 
-  open Impl
-  open Field
-  module Field = Field
+  module Field = Impl.Field
 
-  let block_cipher (params : _ Sponge.Params.t) init =
+  let block_cipher (_params : _ Sponge.Params.t) init =
+    let open Impl in
     Impl.with_label __LOC__ (fun () ->
         let t =
           exists
@@ -55,15 +47,10 @@ struct
         in
         t.(0) <- init ;
         (let open Kimchi_backend_common.Plonk_constraint_system.Plonk_constraint in
-        with_label __LOC__ (fun () ->
-            Impl.assert_
-              { basic = T (Poseidon { state = t })
-              ; annotation = Some "plonk-poseidon"
-              } )) ;
+        with_label __LOC__ (fun () -> Impl.assert_ (Poseidon { state = t }))) ;
         t.(Int.(Array.length t - 1)) )
 
-  let add_assign ~state i x =
-    state.(i) <- Util.seal (module Impl) (state.(i) + x)
+  let add_assign ~state i x = state.(i) <- Utils.seal Field.(state.(i) + x)
 
   let copy = Array.copy
 end

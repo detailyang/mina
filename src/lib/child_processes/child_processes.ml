@@ -1,6 +1,5 @@
 (* child_processes.ml -- management of starting, tracking, and killing child processes. *)
 
-open Inline_test_quiet_logs
 open Core
 open Async
 open Pipe_lib
@@ -139,7 +138,7 @@ let maybe_kill_and_unlock : string -> Filename.t -> Logger.t -> unit Deferred.t
       in
       match%bind Sys.file_exists lockpath with
       | `Yes | `Unknown -> (
-          match%bind try_with (fun () -> Sys.remove lockpath) with
+          match%bind try_with ~here:[%here] (fun () -> Sys.remove lockpath) with
           | Ok () ->
               Deferred.unit
           | Error exn ->
@@ -270,11 +269,7 @@ let start_custom :
       Deferred.Or_error.try_with ~here:[%here] (fun () -> Process.wait process)
     in
     [%log trace] "child process %s died" name ;
-    don't_wait_for
-      (let%bind () = after (Time.Span.of_sec 1.) in
-       let%bind () = Writer.close @@ Process.stdin process in
-       let%bind () = Reader.close @@ Process.stdout process in
-       Reader.close @@ Process.stderr process ) ;
+    don't_wait_for (Writer.close @@ Process.stdin process) ;
     let%bind () = Sys.remove lock_path in
     Ivar.fill terminated_ivar termination_status ;
     let log_bad_termination () =
@@ -333,7 +328,7 @@ let register_process (termination : Termination.t) (process : t) kind =
 
 let%test_module _ =
   ( module struct
-    let logger = Logger.create ()
+    let logger = Logger.null ()
 
     let async_with_temp_dir f =
       Async.Thread_safe.block_on_async_exn (fun () ->

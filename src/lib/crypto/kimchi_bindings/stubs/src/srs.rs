@@ -1,10 +1,12 @@
-use ark_poly::UVPolynomial;
+use crate::lagrange_basis::WithLagrangeBasis;
+use ark_poly::DenseUVPolynomial;
 use ark_poly::{univariate::DensePolynomial, EvaluationDomain, Evaluations};
-use commitment_dlog::{
-    commitment::{b_poly_coefficients, caml::CamlPolyComm},
-    srs::SRS,
-};
 use paste::paste;
+use poly_commitment::SRS as _;
+use poly_commitment::{
+    commitment::{b_poly_coefficients, caml::CamlPolyComm},
+    ipa::SRS,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, OpenOptions},
@@ -72,6 +74,18 @@ macro_rules! impl_srs {
 
             #[ocaml_gen::func]
             #[ocaml::func]
+            /// This is same as _lagrange_commitments, but returns the result for every
+            /// i <= domain_size.
+            pub fn [<$name:snake _lagrange_commitments_whole_domain>](
+                srs: $name,
+                domain_size: ocaml::Int,
+            ) -> Vec<CamlPolyComm<$CamlG>> {
+                srs.get_lagrange_basis_from_domain_size(domain_size as usize).clone().into_iter().map(|x| x.into()).collect()
+            }
+
+
+            #[ocaml_gen::func]
+            #[ocaml::func]
             pub fn [<$name:snake _lagrange_commitment>](
                 srs: $name,
                 domain_size: ocaml::Int,
@@ -82,12 +96,9 @@ macro_rules! impl_srs {
                         .err()
                         .unwrap()
                 })?;
-
-                let evals = (0..domain_size)
-                    .map(|j| if i == j { <$F as ark_ff::One>::one() } else { <$F as ark_ff::Zero>::zero() })
-                    .collect();
-                let p = Evaluations::<$F>::from_vec_and_domain(evals, x_domain).interpolate();
-                Ok(srs.commit_non_hiding(&p, None).into())
+                srs.with_lagrange_basis(x_domain);
+                let vec_polycomm = srs.get_lagrange_basis_from_domain_size(domain_size as usize);
+                Ok(vec_polycomm[i as usize].clone().into())
             }
 
             #[ocaml_gen::func]
@@ -96,10 +107,8 @@ macro_rules! impl_srs {
                 srs: $name,
                 log2_size: ocaml::Int,
             ) {
-                let ptr: &mut commitment_dlog::srs::SRS<$G> =
-                    unsafe { &mut *(std::sync::Arc::as_ptr(&srs) as *mut _) };
                 let domain = EvaluationDomain::<$F>::new(1 << (log2_size as usize)).expect("invalid domain size");
-                ptr.add_lagrange_basis(domain);
+                srs.with_lagrange_basis(domain);
             }
 
             #[ocaml_gen::func]
@@ -118,7 +127,7 @@ macro_rules! impl_srs {
                 let evals = evals.into_iter().map(Into::into).collect();
                 let p = Evaluations::<$F>::from_vec_and_domain(evals, x_domain).interpolate();
 
-                Ok(srs.commit_non_hiding(&p, None).into())
+                Ok(srs.commit_non_hiding(&p, 1).into())
             }
 
             #[ocaml_gen::func]
@@ -131,7 +140,7 @@ macro_rules! impl_srs {
                 let coeffs = b_poly_coefficients(&chals);
                 let p = DensePolynomial::<$F>::from_coefficients_vec(coeffs);
 
-                Ok(srs.commit_non_hiding(&p, None).into())
+                Ok(srs.commit_non_hiding(&p, 1).into())
             }
 
             #[ocaml_gen::func]

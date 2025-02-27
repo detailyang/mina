@@ -36,7 +36,7 @@ module type Full = sig
           type t =
             ( State_hash.Stable.V1.t
             , Blockchain_state.Value.Stable.V2.t
-            , Consensus.Data.Consensus_state.Value.Stable.V1.t
+            , Consensus.Data.Consensus_state.Value.Stable.V2.t
             , Protocol_constants_checked.Value.Stable.V1.t )
             Poly.Stable.V1.t
           [@@deriving equal, ord, bin_io, hash, sexp, yojson, version]
@@ -120,6 +120,25 @@ module type Full = sig
 
   val genesis_state_hash :
     ?state_hash:State_hash.t option -> Value.t -> State_hash.t
+
+  val snarked_ledger_hash :
+       ( _
+       , ( _
+         , ( _
+           , 'snarked_ledger_hash
+           , _
+           , _
+           , _
+           , _
+           , _
+           , _
+           , _ )
+           Blockchain_state.Poly.t
+         , _
+         , _ )
+         Body.t )
+       Poly.t
+    -> 'snarked_ledger_hash
 
   val genesis_state_hash_checked :
     state_hash:State_hash.var -> var -> State_hash.var Checked.t

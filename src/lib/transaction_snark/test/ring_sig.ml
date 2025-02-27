@@ -56,7 +56,7 @@ let ring_sig_rule (ring_member_pks : Schnorr.Chunked.Public_key.t list) :
         ; public_output = ()
         ; auxiliary_output = ()
         } )
-  ; uses_lookup = false
+  ; feature_flags = Pickles_types.Plonk_types.Features.none_bool
   }
 
 let%test_unit "1-of-1" =
@@ -99,7 +99,12 @@ let%test_unit "1-of-2" =
       |> run_and_check |> Or_error.ok_exn )
 
 (* test a snapp tx with a 3-account_update ring *)
-let%test_unit "ring-signature snapp tx with 3 zkapp_command" =
+let%test_unit "ring-signature zkapp tx with 3 zkapp_command" =
+  let proof_cache =
+    Result.ok_or_failwith @@ Pickles.Proof_cache.of_yojson
+    @@ Yojson.Safe.from_file "proof_cache.json"
+  in
+  Transaction_snark.For_tests.set_proof_cache proof_cache ;
   let open Mina_transaction_logic.For_tests in
   let gen =
     let open Quickcheck.Generator.Let_syntax in
@@ -121,20 +126,16 @@ let%test_unit "ring-signature snapp tx with 3 zkapp_command" =
       Ledger.with_ledger ~depth:ledger_depth ~f:(fun ledger ->
           Init_ledger.init (module Ledger.Ledger_inner) init_ledger ledger ;
           let spec = List.hd_exn specs in
-          let tag, _, (module P), Pickles.Provers.[ ringsig_prover; _ ] =
-            Pickles.compile () ~cache:Cache_dir.cache
+          let tag, _, (module P), Pickles.Provers.[ ringsig_prover ] =
+            Pickles.compile () ~cache:Cache_dir.cache ~proof_cache
               ~public_input:(Input Zkapp_statement.typ) ~auxiliary_typ:Typ.unit
-              ~branches:(module Nat.N2)
-              ~max_proofs_verified:(module Nat.N2)
-                (* You have to put 2 here... *)
+              ~branches:(module Nat.N1)
+              ~max_proofs_verified:(module Nat.N0)
               ~name:"ringsig"
-              ~constraint_constants:
-                (Genesis_constants.Constraint_constants.to_snark_keys_header
-                   constraint_constants )
-              ~choices:(fun ~self ->
-                [ ring_sig_rule ring_member_pks; dummy_rule self ] )
+              ~choices:(fun ~self:_ -> [ ring_sig_rule ring_member_pks ])
           in
           let vk = Pickles.Side_loaded.Verification_key.of_compiled tag in
+          let vk = Async.Thread_safe.block_on_async_exn (fun () -> vk) in
           ( if debug_mode then
             Binable.to_string (module Side_loaded_verification_key.Stable.V2) vk
             |> Base64.encode_exn ~alphabet:Base64.uri_safe_alphabet
@@ -201,9 +202,12 @@ let%test_unit "ring-signature snapp tx with 3 zkapp_command" =
                 ; preconditions =
                     { Account_update.Preconditions.network =
                         Zkapp_precondition.Protocol_state.accept
-                    ; account = Nonce (Account.Nonce.succ sender_nonce)
+                    ; account =
+                        Zkapp_precondition.Account.nonce
+                          (Account.Nonce.succ sender_nonce)
+                    ; valid_while = Ignore
                     }
-                ; caller = Call
+                ; may_use_token = No
                 ; use_full_commitment = false
                 ; authorization_kind = Signature
                 }
@@ -225,13 +229,15 @@ let%test_unit "ring-signature snapp tx with 3 zkapp_command" =
                 ; preconditions =
                     { Account_update.Preconditions.network =
                         Zkapp_precondition.Protocol_state.accept
-                    ; account = Full Zkapp_precondition.Account.accept
+                    ; account = Zkapp_precondition.Account.accept
+                    ; valid_while = Ignore
                     }
+                ; may_use_token = No
                 ; use_full_commitment = false
-                ; caller = Call
-                ; authorization_kind = Proof
+                ; authorization_kind = Proof (With_hash.hash vk)
                 }
-            ; authorization = Proof Mina_base.Proof.transaction_dummy
+            ; authorization =
+                Proof (Lazy.force Mina_base.Proof.transaction_dummy)
             }
           in
           let protocol_state = Zkapp_precondition.Protocol_state.accept in
@@ -248,9 +254,7 @@ let%test_unit "ring-signature snapp tx with 3 zkapp_command" =
           let tx_statement : Zkapp_statement.t =
             { account_update =
                 Account_update.Body.digest
-                  (Zkapp_command.add_caller_simple snapp_account_update_data
-                     Token_id.default )
-                    .body
+                  (Account_update.of_simple snapp_account_update_data).body
             ; calls = (Zkapp_command.Digest.Forest.empty :> field)
             }
           in
@@ -267,10 +271,11 @@ let%test_unit "ring-signature snapp tx with 3 zkapp_command" =
             | _ ->
                 respond Unhandled
           in
-          let (), (), (pi : Pickles.Side_loaded.Proof.t) =
+          let (), (), (pi : _ Pickles.Proof.t) =
             (fun () -> ringsig_prover ~handler tx_statement)
             |> Async.Thread_safe.block_on_async_exn
           in
+          let pi = Pickles.Side_loaded.Proof.of_proof pi in
           let fee_payer =
             let txn_comm =
               Zkapp_command.Transaction_commitment.create_complete transaction
@@ -329,4 +334,10 @@ let%test_unit "ring-signature snapp tx with 3 zkapp_command" =
             |> Yojson.Safe.pretty_to_string
             |> printf "protocol_state:\n%s\n\n" )
           |> fun () ->
-          ignore (apply_zkapp_command ledger [ zkapp_command ] : Sparse_ledger.t) ) )
+          Async.Thread_safe.block_on_async_exn (fun () ->
+              check_zkapp_command_with_merges_exn ledger [ zkapp_command ] ) ) ) ;
+  match Sys.getenv "PROOF_CACHE_OUT" with
+  | Some path ->
+      Yojson.Safe.to_file path @@ Pickles.Proof_cache.to_yojson proof_cache
+  | None ->
+      ()

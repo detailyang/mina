@@ -6,11 +6,15 @@ module Statement : sig
   type t = Transaction_snark.Statement.t One_or_two.t
   [@@deriving compare, sexp, yojson, equal]
 
+  include Comparable.S with type t := t
+
   include Hashable.S with type t := t
 
   module Stable : sig
     module V2 : sig
       type t [@@deriving bin_io, compare, sexp, version, yojson, equal]
+
+      include Comparable.S with type t := t
 
       include Hashable.S_binable with type t := t
     end
@@ -47,14 +51,23 @@ end
        H(all_statements_in_bundle || fee || public_key)
 *)
 
+module type S = sig
+  type t
+
+  val fee : t -> Fee.t
+
+  val prover : t -> Public_key.Compressed.t
+
+  val proofs : t -> Ledger_proof.t One_or_two.t
+end
+
 type t = Mina_wire_types.Transaction_snark_work.V2.t =
-  { fee : Fee.t
+  { fee : Currency.Fee.t
   ; proofs : Ledger_proof.t One_or_two.t
   ; prover : Public_key.Compressed.t
   }
-[@@deriving compare, sexp, yojson]
 
-val fee : t -> Fee.t
+include S with type t := t
 
 val info : t -> Info.t
 
@@ -62,7 +75,7 @@ val statement : t -> Statement.t
 
 module Stable : sig
   module V2 : sig
-    type t [@@deriving equal, sexp, compare, bin_io, yojson, version]
+    type t [@@deriving bin_io, equal, sexp, version, yojson]
   end
 end
 with type V2.t = t
@@ -70,14 +83,7 @@ with type V2.t = t
 type unchecked = t
 
 module Checked : sig
-  type nonrec t = t =
-    { fee : Fee.t
-    ; proofs : Ledger_proof.t One_or_two.t
-    ; prover : Public_key.Compressed.t
-    }
-  [@@deriving sexp, compare, to_yojson]
-
-  module Stable : module type of Stable
+  include S
 
   val create_unsafe : unchecked -> t
 

@@ -3,7 +3,7 @@ module Data : sig
     module V1 : sig
       type t = { constraints : int } [@@deriving yojson]
 
-      include Pickles_types.Sigs.VERSIONED
+      include Plonkish_prelude.Sigs.VERSIONED
     end
   end
 
@@ -19,9 +19,9 @@ module Stable : sig
       ; index : Impls.Wrap.Verification_key.t
       ; data : Data.t
       }
-    [@@deriving fields, to_yojson, bin_shape, bin_io]
+    [@@deriving fields, to_yojson, of_yojson, bin_shape, bin_io]
 
-    include Pickles_types.Sigs.VERSIONED
+    include Plonkish_prelude.Sigs.VERSIONED
   end
 
   module Latest = V2
@@ -33,8 +33,11 @@ type t = Stable.Latest.t =
   ; index : Impls.Wrap.Verification_key.t
   ; data : Data.t
   }
-[@@deriving fields, to_yojson]
+[@@deriving fields, to_yojson, of_yojson]
 
 val dummy_commitments : 'a -> 'a Pickles_types.Plonk_verification_key_evals.t
+
+val dummy_step_commitments :
+  'a -> ('a, 'a option) Pickles_types.Plonk_verification_key_evals.Step.t
 
 val dummy : Stable.Latest.t lazy_t

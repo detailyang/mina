@@ -1,20 +1,20 @@
-(* Domain specification *)
+(** Wrapping integers for computing NTT domain *)
 
 module Stable : sig
   module V1 : sig
     type t = Pow_2_roots_of_unity of int
-    [@@deriving sexp, equal, compare, hash, yojson]
+    [@@unboxed] [@@deriving sexp, equal, compare, hash, yojson]
 
-    include Pickles_types.Sigs.Binable.S with type t := t
+    include Plonkish_prelude.Sigs.Binable.S with type t := t
 
-    include Pickles_types.Sigs.VERSIONED
+    include Plonkish_prelude.Sigs.VERSIONED
   end
 
   module Latest = V1
 end
 
 type t = Stable.Latest.t = Pow_2_roots_of_unity of int
-[@@deriving sexp, equal, compare, hash, yojson]
+[@@unboxed] [@@deriving sexp, equal, compare, hash, yojson]
 
 include Core_kernel.Hashable.S with type t := t
 

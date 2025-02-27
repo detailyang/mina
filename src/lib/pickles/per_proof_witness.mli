@@ -1,6 +1,8 @@
-module Impl = Impls.Step
+(** The information required to recursively verify a Pickles proof. *)
 
-module One_hot_vector : module type of One_hot_vector.Make (Impls.Step)
+open Pickles_types
+module Impl = Impls.Step
+module One_hot_vector = One_hot_vector.Step
 
 type challenge = Import.Challenge.Make(Impls.Step).t
 
@@ -23,17 +25,16 @@ type ('app_state, 'max_proofs_verified, 'num_branches) t =
       ( challenge
       , scalar_challenge
       , Impl.Field.t Pickles_types.Shifted_value.Type1.t
-      , ( ( scalar_challenge
-          , Impl.Field.t Pickles_types.Shifted_value.Type1.t )
-          Import.Types.Wrap.Proof_state.Deferred_values.Plonk.In_circuit.Lookup
-          .t
+      , ( Impl.Field.t Pickles_types.Shifted_value.Type1.t
         , Impl.Boolean.var )
-        Pickles_types.Plonk_types.Opt.t
+        Pickles_types.Opt.t
+      , (scalar_challenge, Impl.Boolean.var) Pickles_types.Opt.t
+      , Impl.Boolean.var
       , unit
       , Import.Digest.Make(Impl).t
       , scalar_challenge Import.Bulletproof_challenge.t
         Import.Types.Step_bp_vec.t
-      , Impl.field Import.Branch_data.Checked.t )
+      , Import.Branch_data.Checked.Step.t )
       Import.Types.Wrap.Proof_state.In_circuit.t
         (** The accumulator state corresponding to the above proof. Contains
       - `deferred_values`: The values necessary for finishing the deferred "scalar field" computations.
@@ -74,18 +75,16 @@ module Constant : sig
 
   type scalar_challenge = challenge Import.Scalar_challenge.t
 
-  type ('statement, 'max_proofs_verified, _) t =
+  type ('statement, 'max_proofs_verified) t =
     { app_state : 'statement
     ; wrap_proof : Wrap_proof.Constant.t
     ; proof_state :
         ( challenge
         , scalar_challenge
         , Backend.Tick.Field.t Pickles_types.Shifted_value.Type1.t
-        , ( scalar_challenge
-          , Backend.Tick.Field.t Pickles_types.Shifted_value.Type1.t )
-          Import.Types.Wrap.Proof_state.Deferred_values.Plonk.In_circuit.Lookup
-          .t
-          option
+        , Backend.Tick.Field.t Pickles_types.Shifted_value.Type1.t option
+        , scalar_challenge option
+        , bool
         , unit
         , Import.Digest.Constant.t
         , scalar_challenge Import.Bulletproof_challenge.t
@@ -107,14 +106,13 @@ module Constant : sig
     }
 
   module No_app_state : sig
-    type nonrec (_, 'max_proofs_verified, 'num_branches) t =
-      (unit, 'max_proofs_verified, 'num_branches) t
+    type nonrec (_, 'max_proofs_verified, _) t = (unit, 'max_proofs_verified) t
   end
 end
 
 val typ :
-     lookup:Pickles_types.Plonk_types.Opt.Flag.t
+     feature_flags:Opt.Flag.t Plonk_types.Features.Full.t
+  -> num_chunks:int
   -> ('avar, 'aval) Impl.Typ.t
   -> 'n Pickles_types.Nat.t
-  -> 'm Pickles_types.Nat.t
-  -> (('avar, 'n, 'm) t, ('aval, 'n, 'm) Constant.t) Impl.Typ.t
+  -> (('avar, 'n, _) t, ('aval, 'n) Constant.t) Impl.Typ.t

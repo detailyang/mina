@@ -10,7 +10,7 @@ module Inputs = struct
       match proof_level with
       | Genesis_constants.Proof_level.Full ->
           failwith "Unable to handle proof-level=Full"
-      | Check | None ->
+      | Check | No_check ->
           Deferred.unit
 
     let worker_wait_time = 0.5
@@ -29,6 +29,6 @@ module Inputs = struct
     let sok_digest = Sok_message.digest message in
     Deferred.Or_error.return
     @@ ( Transaction_snark.create ~statement:{ stmt with sok_digest }
-           ~proof:Proof.transaction_dummy
+           ~proof:(Lazy.force Proof.transaction_dummy)
        , Time.Span.zero )
 end

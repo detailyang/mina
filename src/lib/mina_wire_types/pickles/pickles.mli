@@ -7,14 +7,16 @@ module Types : sig
 
       module Proofs_verified_2 : sig
         module V2 : sig
-          type nonrec t = (Pickles_types.Nat.N2.n, Pickles_types.Nat.N2.n) t
+          type nonrec t = (Pickles_types.Nat.two, Pickles_types.Nat.two) t
         end
       end
     end
 
     module Side_loaded : sig
       module Verification_key : sig
-        module Max_width : module type of Pickles_types.Nat.N2
+        module Max_width : sig
+          type n = Pickles_types.Nat.two
+        end
 
         module V2 : sig
           type t
@@ -59,32 +61,82 @@ module Concrete_ : sig
     end
   end
 
+  module Wrap_wire_proof : sig
+    type fp_point := Pasta_bindings.Fp.t * Pasta_bindings.Fp.t
+
+    type fq_point := Pasta_bindings.Fq.t * Pasta_bindings.Fq.t
+
+    type 'a columns_vec :=
+      ('a, Pickles_types.Nat.fifteen) Pickles_types.Vector.t
+
+    type 'a quotient_polynomial_vec :=
+      ('a, Pickles_types.Nat.seven) Pickles_types.Vector.t
+
+    type 'a permuts_minus_1_vec :=
+      ('a, Pickles_types.Nat.six) Pickles_types.Vector.t
+
+    module Commitments : sig
+      module V1 : sig
+        type t =
+          { w_comm : fp_point columns_vec
+          ; z_comm : fp_point
+          ; t_comm : fp_point quotient_polynomial_vec
+          }
+      end
+    end
+
+    module Evaluations : sig
+      module V1 : sig
+        type t =
+          { w : fq_point columns_vec
+          ; coefficients : fq_point columns_vec
+          ; z : fq_point
+          ; s : fq_point permuts_minus_1_vec
+          ; generic_selector : fq_point
+          ; poseidon_selector : fq_point
+          ; complete_add_selector : fq_point
+          ; mul_selector : fq_point
+          ; emul_selector : fq_point
+          ; endomul_scalar_selector : fq_point
+          }
+      end
+    end
+
+    module V1 : sig
+      type t =
+        { commitments : Commitments.V1.t
+        ; evaluations : Evaluations.V1.t
+        ; ft_eval1 : Pasta_bindings.Fq.t
+        ; bulletproof :
+            ( fp_point
+            , Pasta_bindings.Fq.t )
+            Pickles_types.Plonk_types.Openings.Bulletproof.V1.t
+        }
+    end
+  end
+
   module Proof : sig
     (* We define some type aliases directly *)
     type challenge_constant =
-      Pickles_limb_vector.Constant.Make(Pickles_types.Nat.N2).t
+      Pickles_types.Nat.two Pickles_limb_vector.Constant.t
 
     type tock_affine = Pasta_bindings.Fp.t * Pasta_bindings.Fp.t
 
-    type 'a step_bp_vec = 'a Kimchi_pasta.Basic.Rounds.Step_vector.Stable.V1.t
+    type 'a step_bp_vec = ('a, Pickles_types.Nat.sixteen) Pickles_types.Vector.t
 
     module Base : sig
       module Wrap : sig
         module V2 : sig
           type digest_constant =
-            Pickles_limb_vector.Constant.Make(Pickles_types.Nat.N4).t
-
-          type tock_proof =
-            ( tock_affine
-            , Pasta_bindings.Fq.t
-            , Pasta_bindings.Fq.t array )
-            Pickles_types.Plonk_types.Proof.Stable.V2.t
+            Pickles_types.Nat.four Pickles_limb_vector.Constant.t
 
           type ('messages_for_next_wrap_proof, 'messages_for_next_step_proof) t =
             { statement :
                 ( challenge_constant
                 , challenge_constant Kimchi_types.scalar_challenge
-                , Snark_params.Tick.Field.t Pickles_types.Shifted_value.Type1.t
+                , Snark_params.Tick.Field.t
+                  Pickles_types.Shifted_value.Type1.V1.t
+                , bool
                 , 'messages_for_next_wrap_proof
                 , digest_constant
                 , 'messages_for_next_step_proof
@@ -96,8 +148,8 @@ module Concrete_ : sig
             ; prev_evals :
                 ( Snark_params.Tick.Field.t
                 , Snark_params.Tick.Field.t array )
-                Pickles_types.Plonk_types.All_evals.t
-            ; proof : tock_proof
+                Pickles_types.Plonk_types.All_evals.V1.t
+            ; proof : Wrap_wire_proof.V1.t
             }
         end
       end
@@ -122,7 +174,7 @@ module Concrete_ : sig
 
     module Proofs_verified_2 : sig
       module V2 : sig
-        type nonrec t = (Pickles_types.Nat.N2.n, Pickles_types.Nat.N2.n) t
+        type nonrec t = (Pickles_types.Nat.two, Pickles_types.Nat.two) t
       end
     end
   end
@@ -149,7 +201,9 @@ module Concrete_ : sig
           Pickles_base.Side_loaded_verification_key.Poly.V2.t
       end
 
-      module Max_width = Pickles_types.Nat.N2
+      module Max_width : sig
+        type n = Pickles_types.Nat.two
+      end
     end
 
     module Proof : sig

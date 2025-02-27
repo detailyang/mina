@@ -4,7 +4,7 @@ open Signature_lib
 let validate_int16 x =
   let max_port = 1 lsl 16 in
   if 0 <= x && x < max_port then Ok x
-  else Or_error.errorf !"Port not between 0 and %d" max_port
+  else Or_error.errorf "Port not between 0 and %d" max_port
 
 let int16 =
   Command.Arg_type.map Command.Param.int
@@ -72,8 +72,11 @@ let receipt_chain_hash =
 let peer : Host_and_port.t Command.Arg_type.t =
   Command.Arg_type.create (fun s -> Host_and_port.of_string s)
 
+let uri : Uri.t Command.Arg_type.t = Command.Arg_type.create Uri.of_string
+
 let global_slot =
-  Command.Arg_type.map Command.Param.int ~f:Mina_numbers.Global_slot.of_int
+  Command.Arg_type.map Command.Param.int
+    ~f:Mina_numbers.Global_slot_since_genesis.of_int
 
 let txn_fee =
   Command.Arg_type.map Command.Param.string ~f:Currency.Fee.of_mina_string_exn
@@ -118,14 +121,7 @@ let user_command =
           Error.tag err ~tag:"Couldn't decode transaction id" |> Error.raise )
 
 module Work_selection_method = struct
-  [%%versioned
-  module Stable = struct
-    module V1 = struct
-      type t = Sequence | Random
-
-      let to_latest = Fn.id
-    end
-  end]
+  type t = Sequence | Random | Random_offset
 end
 
 let work_selection_method_val = function
@@ -133,6 +129,8 @@ let work_selection_method_val = function
       Work_selection_method.Sequence
   | "rand" ->
       Random
+  | "roffset" ->
+      Random_offset
   | _ ->
       failwith "Invalid work selection"
 
@@ -146,3 +144,5 @@ let work_selection_method_to_module :
       (module Work_selector.Selection_methods.Sequence)
   | Random ->
       (module Work_selector.Selection_methods.Random)
+  | Random_offset ->
+      (module Work_selector.Selection_methods.Random_offset)

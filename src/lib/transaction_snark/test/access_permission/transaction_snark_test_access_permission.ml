@@ -10,7 +10,15 @@ module Zkapp_command_segment = Transaction_snark.Zkapp_command_segment
 
 let%test_module "Access permission tests" =
   ( module struct
-    let sk = Private_key.create ()
+    let proof_cache =
+      Result.ok_or_failwith @@ Pickles.Proof_cache.of_yojson
+      @@ Yojson.Safe.from_file "proof_cache.json"
+
+    let () = Transaction_snark.For_tests.set_proof_cache proof_cache
+
+    let () = Backtrace.elide := false
+
+    let sk = Quickcheck.random_value Private_key.gen
 
     let pk = Public_key.of_private_key_exn sk
 
@@ -19,19 +27,20 @@ let%test_module "Access permission tests" =
     let account_id = Account_id.create pk_compressed Token_id.default
 
     let tag, _, p_module, Pickles.Provers.[ prover ] =
-      Zkapps_examples.compile () ~cache:Cache_dir.cache
+      Zkapps_examples.compile () ~cache:Cache_dir.cache ~proof_cache
         ~auxiliary_typ:Impl.Typ.unit
         ~branches:(module Nat.N1)
         ~max_proofs_verified:(module Nat.N0)
         ~name:"empty_update"
-        ~constraint_constants:
-          (Genesis_constants.Constraint_constants.to_snark_keys_header
-             constraint_constants )
         ~choices:(fun ~self:_ -> [ Zkapps_empty_update.rule pk_compressed ])
 
     module P = (val p_module)
 
-    let vk = Pickles.Side_loaded.Verification_key.of_compiled tag
+    let vk =
+      Async.Thread_safe.block_on_async_exn (fun () ->
+          Pickles.Side_loaded.Verification_key.of_compiled tag )
+
+    let vk_hash = Mina_base.Verification_key_wire.digest_vk vk
 
     let ({ account_update; _ } : _ Zkapp_command.Call_forest.tree), () =
       Async.Thread_safe.block_on_async_exn prover
@@ -39,18 +48,23 @@ let%test_module "Access permission tests" =
     let memo = Signed_command_memo.empty
 
     let run_test ?expected_failure auth_kind access_permission =
-      let account_update =
+      let account_update : Account_update.t =
         match auth_kind with
-        | Account_update.Authorization_kind.Proof ->
-            account_update
+        | Account_update.Authorization_kind.Proof _ ->
+            { body = { account_update.body with authorization_kind = auth_kind }
+            ; authorization = account_update.authorization
+            }
         | Account_update.Authorization_kind.Signature ->
             { body =
                 { account_update.body with
                   authorization_kind = auth_kind
                 ; increment_nonce = true
                 ; preconditions =
-                    { account = Nonce Mina_numbers.Account_nonce.(succ zero)
+                    { account =
+                        Zkapp_precondition.Account.nonce
+                          Mina_numbers.Account_nonce.(succ zero)
                     ; network = account_update.body.preconditions.network
+                    ; valid_while = Ignore
                     }
                 }
             ; authorization = Signature Signature.dummy
@@ -68,22 +82,15 @@ let%test_module "Access permission tests" =
             { Account_update.Update.dummy with
               permissions =
                 Set { Permissions.user_default with access = access_permission }
-            ; verification_key =
-                Set
-                  { data = vk
-                  ; hash =
-                      (* TODO: This function should live in
-                         [Side_loaded_verification_key].
-                      *)
-                      Zkapp_account.digest_vk vk
-                  }
+            ; verification_key = Set { data = vk; hash = vk_hash }
             }
         ; preconditions =
             { Account_update.Preconditions.network =
                 Zkapp_precondition.Protocol_state.accept
-            ; account = Accept
+            ; account = Zkapp_precondition.Account.accept
+            ; valid_while = Ignore
             }
-        ; caller = Token_id.default
+        ; may_use_token = No
         ; use_full_commitment = true
         ; authorization_kind = Signature
         }
@@ -185,31 +192,47 @@ let%test_module "Access permission tests" =
 
     let%test_unit "None_given with None" = run_test None_given None
 
-    let%test_unit "Proof with None" = run_test Proof None
+    let%test_unit "Proof with None" = run_test (Proof vk_hash) None
 
     let%test_unit "Signature with None" = run_test Signature None
 
     let%test_unit "None_given with Either" =
-      run_test ~expected_failure:Update_not_permitted_access None_given Either
+      run_test
+        ~expected_failure:(Update_not_permitted_access, Pass_2)
+        None_given Either
 
-    let%test_unit "Proof with Either" = run_test Proof Either
+    let%test_unit "Proof with Either" = run_test (Proof vk_hash) Either
 
     let%test_unit "Signature with Either" = run_test Signature Either
 
     let%test_unit "None_given with Proof" =
-      run_test ~expected_failure:Update_not_permitted_access None_given Proof
+      run_test
+        ~expected_failure:(Update_not_permitted_access, Pass_2)
+        None_given Proof
 
-    let%test_unit "Proof with Proof" = run_test Proof Proof
+    let%test_unit "Proof with Proof" = run_test (Proof vk_hash) Proof
 
     let%test_unit "Signature with Proof" =
-      run_test ~expected_failure:Update_not_permitted_access Signature Proof
+      run_test
+        ~expected_failure:(Update_not_permitted_access, Pass_2)
+        Signature Proof
 
     let%test_unit "None_given with Signature" =
-      run_test ~expected_failure:Update_not_permitted_access None_given
-        Signature
+      run_test
+        ~expected_failure:(Update_not_permitted_access, Pass_2)
+        None_given Signature
 
     let%test_unit "Proof with Signature" =
-      run_test ~expected_failure:Update_not_permitted_access Proof Signature
+      run_test
+        ~expected_failure:(Update_not_permitted_access, Pass_2)
+        (Proof vk_hash) Signature
 
     let%test_unit "Signature with Signature" = run_test Signature Signature
+
+    let () =
+      match Sys.getenv_opt "PROOF_CACHE_OUT" with
+      | Some path ->
+          Yojson.Safe.to_file path @@ Pickles.Proof_cache.to_yojson proof_cache
+      | None ->
+          ()
   end )
